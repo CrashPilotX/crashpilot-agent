@@ -1,0 +1,29 @@
+[Unit]
+Description=CrashPilot — AI Linux Crash Forensics Agent
+Documentation=https://kdigitalsystems.github.io/CrashPilot
+After=network.target systemd-journald.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+User=root
+ExecStart=/usr/local/bin/crashpilot analyze
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crashpilot
+# Give the agent up to 5 minutes for AI analysis
+TimeoutStartSec=300
+# Don't restart — we only want to run once per boot
+Restart=no
+
+# Security hardening
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectHome=read-only
+ProtectSystem=full
+# Allow reading system logs and hardware info
+ReadOnlyPaths=/var /run /sys /proc
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crashpilot"
+version = "0.1.0"
+description = "AI-powered Linux crash forensics and root-cause analysis"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.40.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "rich>=13.9.0",
+    "typer>=0.13.0",
+    "psutil>=6.1.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "aiofiles>=24.1.0",
+    "httpx>=0.28.0",
+]
+
+[project.scripts]
+crashpilot = "crashpilot.main:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "mypy>=1.13", "ruff>=0.8"]

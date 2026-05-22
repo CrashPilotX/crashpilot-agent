@@ -1,0 +1,25 @@
+[Unit]
+Description=CrashPilot API Server
+Documentation=https://kdigitalsystems.github.io/CrashPilot
+After=network.target crashpilot.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/usr/local/bin/crashpilot serve --host 127.0.0.1 --port 7878
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crashpilot-api
+
+# Load API key from user config
+EnvironmentFile=-%h/.config/crashpilot/.env
+
+# Security
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
