@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS meta (
 @contextmanager
 def _conn() -> Generator[sqlite3.Connection, None, None]:
     cfg = get_settings()
-    con = sqlite3.connect(cfg.db_path, timeout=10)
+    # str() required for Python 3.10 compatibility (Path accepted natively in 3.11+)
+    con = sqlite3.connect(str(cfg.db_path), timeout=10)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
@@ -127,6 +128,33 @@ def get_report(report_id: str) -> dict | None:
     if r["analysis"]:
         r["analysis"] = json.loads(r["analysis"])
     return r
+
+
+def delete_report(report_id: str) -> bool:
+    """Delete a single report. Returns True if a row was deleted."""
+    with _conn() as con:
+        cur = con.execute("DELETE FROM crash_reports WHERE id=?", (report_id,))
+    return cur.rowcount > 0
+
+
+def cleanup_old_reports(max_age_days: int) -> int:
+    """Delete reports older than *max_age_days*. Returns number of rows deleted."""
+    with _conn() as con:
+        cur = con.execute(
+            """DELETE FROM crash_reports
+               WHERE COALESCE(crash_time, detected_at) <
+                     strftime('%Y-%m-%dT%H:%M:%SZ',
+                              datetime('now', ? || ' days'))""",
+            (f"-{max_age_days}",),
+        )
+    return cur.rowcount
+
+
+def count_reports() -> int:
+    """Return total number of stored reports without loading rows."""
+    with _conn() as con:
+        row = con.execute("SELECT COUNT(*) FROM crash_reports").fetchone()
+    return row[0] if row else 0
 
 
 def set_meta(key: str, value: str) -> None:

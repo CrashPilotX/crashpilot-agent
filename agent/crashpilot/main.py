@@ -206,7 +206,8 @@ def install_service() -> None:
     import subprocess
     import shutil
 
-    service_src = Path(__file__).parent.parent.parent.parent / "systemd" / "crashpilot.service"
+    # __file__ = <project>/agent/crashpilot/main.py  →  .parent×3 = <project>/
+    service_src = Path(__file__).parent.parent.parent / "systemd" / "crashpilot.service"
     if not service_src.exists():
         console.print(f"[red]Service file not found at {service_src}[/red]")
         raise typer.Exit(1)

@@ -33,7 +33,7 @@ from .collectors.thermal import ThermalCollector
 from .collectors.vm import VmCollector
 from .collectors.wsl import WslCollector
 from .config import get_settings
-from .storage.store import get_meta, init_db, save_report, set_meta, update_analysis
+from .storage.store import cleanup_old_reports, get_meta, init_db, save_report, set_meta, update_analysis
 
 log = logging.getLogger(__name__)
 
@@ -264,6 +264,13 @@ async def check_and_analyze(force: bool = False) -> dict | None:
         log.warning("No API key — set CRASHPILOT_ANTHROPIC_API_KEY for AI analysis.")
 
     set_meta("last_analyzed_boot", boot_id)
+
+    # Purge reports older than max_report_age_days
+    if cfg.max_report_age_days > 0:
+        removed = cleanup_old_reports(cfg.max_report_age_days)
+        if removed:
+            log.info("Pruned %d report(s) older than %d days", removed, cfg.max_report_age_days)
+
     return report
 
 

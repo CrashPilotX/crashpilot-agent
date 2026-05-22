@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
+import shutil
 from typing import Any
 
 
@@ -13,6 +13,7 @@ async def run_cmd(
     input_data: str | None = None,
 ) -> tuple[str, str, int]:
     """Run a subprocess asynchronously and return (stdout, stderr, returncode)."""
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -26,6 +27,13 @@ async def run_cmd(
         )
         return stdout.decode(errors="replace"), stderr.decode(errors="replace"), proc.returncode
     except asyncio.TimeoutError:
+        # Kill the process so it doesn't linger as a zombie
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
         return "", f"command timed out after {timeout}s", -1
     except FileNotFoundError:
         return "", f"command not found: {args[0]}", -1
@@ -34,11 +42,8 @@ async def run_cmd(
 
 
 def cmd_available(name: str) -> bool:
-    """Check if a CLI tool is on PATH."""
-    result = subprocess.run(
-        ["which", name], capture_output=True, timeout=5
-    )
-    return result.returncode == 0
+    """Check if a CLI tool is on PATH (works on all distros including Alpine)."""
+    return shutil.which(name) is not None
 
 
 class BaseCollector:

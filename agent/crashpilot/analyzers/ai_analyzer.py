@@ -10,6 +10,18 @@ import anthropic
 
 from ..config import get_settings
 
+# ---------------------------------------------------------------------------
+# Async client — instantiated lazily so it's never created during import
+# ---------------------------------------------------------------------------
+_async_client: anthropic.AsyncAnthropic | None = None
+
+
+def _get_client(api_key: str) -> anthropic.AsyncAnthropic:
+    global _async_client
+    if _async_client is None or _async_client.api_key != api_key:
+        _async_client = anthropic.AsyncAnthropic(api_key=api_key)
+    return _async_client
+
 SYSTEM_PROMPT = textwrap.dedent("""
 You are CrashPilot, an expert Linux kernel and systems reliability engineer.
 Your job is to perform forensic root-cause analysis of Linux system crashes, reboots, and hangs.
@@ -111,7 +123,7 @@ async def analyze_crash(
     if not cfg.anthropic_api_key:
         return _no_api_key_result(detection_result)
 
-    client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
+    client = _get_client(cfg.anthropic_api_key)
 
     truncated = _truncate_telemetry(telemetry)
 
@@ -143,7 +155,7 @@ async def analyze_crash(
     """).strip()
 
     try:
-        message = client.messages.create(
+        message = await client.messages.create(
             model=cfg.claude_model,
             max_tokens=4096,
             system=SYSTEM_PROMPT,

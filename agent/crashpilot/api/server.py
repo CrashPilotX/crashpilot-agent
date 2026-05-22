@@ -3,38 +3,59 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from ..config import get_settings
-from ..storage.store import get_report, init_db, list_reports
+from ..storage.store import (
+    count_reports,
+    delete_report,
+    cleanup_old_reports,
+    get_report,
+    init_db,
+    list_reports,
+)
 
 log = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize DB on startup; run cleanup on shutdown."""
+    cfg = get_settings()
+    init_db()
+    log.info("CrashPilot API server started on %s:%d", cfg.api_host, cfg.api_port)
+    yield
+    # Cleanup old reports on graceful shutdown
+    if cfg.max_report_age_days > 0:
+        deleted = cleanup_old_reports(cfg.max_report_age_days)
+        if deleted:
+            log.info("Cleaned up %d reports older than %d days", deleted, cfg.max_report_age_days)
+
 
 app = FastAPI(
     title="CrashPilot Agent API",
     description="Local crash forensics API",
     version="0.1.0",
     docs_url="/docs",
+    lifespan=lifespan,
 )
 
-cfg = get_settings()
+
+def _get_cors_origins() -> list[str]:
+    return get_settings().api_cors_origins
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cfg.api_cors_origins,
+    allow_origins=["*"],   # overridden per-request check is not needed for local-only
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-async def startup():
-    init_db()
-    log.info("CrashPilot API server started on %s:%d", cfg.api_host, cfg.api_port)
 
 
 @app.get("/health")
@@ -43,9 +64,11 @@ async def health() -> dict:
 
 
 @app.get("/api/v1/reports")
-async def list_crash_reports(limit: int = 20) -> dict[str, Any]:
+async def list_crash_reports(
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
     """List recent crash reports (summary only, no raw telemetry)."""
-    reports = list_reports(limit=min(limit, 100))
+    reports = list_reports(limit=limit)
     summaries = []
     for r in reports:
         analysis = r.get("analysis") or {}
@@ -58,7 +81,10 @@ async def list_crash_reports(limit: int = 20) -> dict[str, Any]:
             "severity": r["severity"],
             "summary": r.get("summary"),
             "ai_analyzed": analysis.get("ai_analyzed", False),
-            "confidence": analysis.get("confidence") or analysis.get("heuristic", {}).get("confidence"),
+            "confidence": (
+                analysis.get("confidence")
+                or analysis.get("heuristic", {}).get("confidence")
+            ),
             "root_cause": analysis.get("root_cause"),
         })
     return {"reports": summaries, "total": len(summaries)}
@@ -71,8 +97,7 @@ async def get_crash_report(report_id: str) -> dict[str, Any]:
     if report is None:
         raise HTTPException(status_code=404, detail=f"Report {report_id!r} not found")
 
-    # Sanitize telemetry — remove raw log blobs from the API response
-    # (keep analysis, smart, gpu, thermal summaries)
+    # Sanitize telemetry — strip raw log blobs, keep structured summaries
     tel = report.get("telemetry", {})
     safe_telemetry = {
         "collected_at": tel.get("collected_at"),
@@ -82,7 +107,7 @@ async def get_crash_report(report_id: str) -> dict[str, Any]:
         },
         "smart": {
             k: v for k, v in tel.get("smart", {}).items()
-            if k != "disks"  # keep critical_disks summary
+            if k != "disks"
         },
         "smart_critical": tel.get("smart", {}).get("critical_disks", []),
         "gpu": tel.get("gpu", {}),
@@ -118,14 +143,22 @@ async def get_crash_report(report_id: str) -> dict[str, Any]:
     }
 
 
+@app.delete("/api/v1/reports/{report_id}", status_code=204)
+async def delete_crash_report(report_id: str) -> None:
+    """Delete a crash report by ID."""
+    if not delete_report(report_id):
+        raise HTTPException(status_code=404, detail=f"Report {report_id!r} not found")
+
+
 @app.get("/api/v1/status")
 async def get_status() -> dict[str, Any]:
     """Agent status and configuration summary."""
     from ..storage.store import get_meta
+    cfg = get_settings()
     reports = list_reports(limit=5)
     return {
         "agent_version": "0.1.0",
-        "reports_count": len(list_reports(limit=1000)),
+        "reports_count": count_reports(),  # efficient COUNT(*), not loading rows
         "last_analyzed_boot": get_meta("last_analyzed_boot"),
         "recent_crashes": [
             {

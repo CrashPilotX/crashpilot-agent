@@ -56,10 +56,12 @@ _RULES: list[tuple[CrashType, Severity, list[str]]] = [
         r"mcelog",
     ]),
     (CrashType.OOM_KILL, Severity.HIGH, [
-        r"Out of memory: Kill process",
+        r"Out of memory: Kill process",    # kernel < 5.x
+        r"Out of memory: Killed process",  # kernel 5.x+
         r"oom_kill_process",
         r"Killed process \d+.*oom_kill",
         r"oom-killer invoked",
+        r"Memory cgroup out of memory",    # cgroup v2 / container OOM
     ]),
     (CrashType.THERMAL_SHUTDOWN, Severity.HIGH, [
         r"ACPI: Thermal Zone.*critical",
