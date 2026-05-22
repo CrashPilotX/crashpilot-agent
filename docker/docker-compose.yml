@@ -1,0 +1,55 @@
+services:
+  crashpilot:
+    image: ghcr.io/kdigitalsystems/crashpilot:latest
+    # Or build locally:
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile
+    container_name: crashpilot
+    restart: unless-stopped
+
+    # Privileged is needed to read /proc, /sys, dmesg, run smartctl
+    privileged: true
+
+    # Expose the API for the web dashboard
+    ports:
+      - "127.0.0.1:7878:7878"
+
+    environment:
+      # Required for AI analysis
+      - CRASHPILOT_ANTHROPIC_API_KEY=${CRASHPILOT_ANTHROPIC_API_KEY:-}
+      - CRASHPILOT_CLAUDE_MODEL=${CRASHPILOT_CLAUDE_MODEL:-claude-opus-4-7}
+      # Bind to all interfaces inside container (mapped to 127.0.0.1 on host)
+      - CRASHPILOT_API_HOST=0.0.0.0
+      - CRASHPILOT_API_PORT=7878
+      - CRASHPILOT_ANALYSIS_TIMEOUT=120
+
+    volumes:
+      # Host log access
+      - /var/log:/var/log:ro
+      - /run/log/journal:/run/log/journal:ro
+      # Kernel / hardware access
+      - /sys:/sys:ro
+      - /proc:/proc:ro
+      - /dev:/dev:ro
+      # Docker socket (for Docker crash collection)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Persistent crash report database
+      - crashpilot_data:/data
+
+    # Give access to host PID namespace for better process visibility
+    pid: host
+
+    # Network host allows reading host network interfaces
+    # network_mode: host  # uncomment if needed
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7878/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  crashpilot_data:
+    driver: local

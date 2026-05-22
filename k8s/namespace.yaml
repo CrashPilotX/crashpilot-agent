@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crashpilot
+  labels:
+    app.kubernetes.io/name: crashpilot
+    app.kubernetes.io/version: "0.1.0"

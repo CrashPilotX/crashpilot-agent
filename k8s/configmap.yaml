@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crashpilot-config
+  namespace: crashpilot
+  labels:
+    app.kubernetes.io/name: crashpilot
+data:
+  CRASHPILOT_API_HOST: "0.0.0.0"
+  CRASHPILOT_API_PORT: "7878"
+  CRASHPILOT_CLAUDE_MODEL: "claude-opus-4-7"
+  CRASHPILOT_ANALYSIS_TIMEOUT: "120"
+  CRASHPILOT_JOURNAL_LINES: "5000"
+---
+# Store API key as a Secret — replace with your actual key or use external secrets
+apiVersion: v1
+kind: Secret
+metadata:
+  name: crashpilot-secrets
+  namespace: crashpilot
+  labels:
+    app.kubernetes.io/name: crashpilot
+type: Opaque
+stringData:
+  CRASHPILOT_ANTHROPIC_API_KEY: ""   # <-- set your key here or use external secrets

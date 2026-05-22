@@ -1,0 +1,196 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: crashpilot
+  namespace: crashpilot
+  labels:
+    app.kubernetes.io/name: crashpilot
+    app.kubernetes.io/component: agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: crashpilot
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: crashpilot
+        app.kubernetes.io/component: agent
+      annotations:
+        # Force pod restart when configmap changes
+        checksum/config: "{{ include (print $.Template.BasePath \"/configmap.yaml\") . | sha256sum }}"
+
+    spec:
+      serviceAccountName: crashpilot
+
+      # Run on every node including control plane
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+          effect: NoExecute
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+
+      # Access host PID namespace for process inspection
+      hostPID: true
+
+      # Host network for better network visibility
+      hostNetwork: false
+
+      initContainers:
+        # Run crash analysis once at startup, then the main container serves
+        - name: analyze
+          image: ghcr.io/kdigitalsystems/crashpilot:latest
+          command: ["crashpilot", "analyze", "--force"]
+          envFrom:
+            - configMapRef:
+                name: crashpilot-config
+            - secretRef:
+                name: crashpilot-secrets
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: host-var-log
+              mountPath: /var/log
+              readOnly: true
+            - name: host-journal
+              mountPath: /run/log/journal
+              readOnly: true
+            - name: host-sys
+              mountPath: /sys
+              readOnly: true
+            - name: host-proc
+              mountPath: /proc
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            privileged: true
+            runAsUser: 0
+
+      containers:
+        - name: api
+          image: ghcr.io/kdigitalsystems/crashpilot:latest
+          command: ["crashpilot", "serve"]
+          args: ["--host", "0.0.0.0", "--port", "7878"]
+          ports:
+            - name: api
+              containerPort: 7878
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: crashpilot-config
+            - secretRef:
+                name: crashpilot-secrets
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: KUBERNETES_SERVICE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: host-var-log
+              mountPath: /var/log
+              readOnly: true
+            - name: host-journal
+              mountPath: /run/log/journal
+              readOnly: true
+            - name: host-sys
+              mountPath: /sys
+              readOnly: true
+            - name: host-proc
+              mountPath: /proc
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 7878
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 7878
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            privileged: true
+            runAsUser: 0
+
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: host-var-log
+          hostPath:
+            path: /var/log
+            type: DirectoryOrCreate
+        - name: host-journal
+          hostPath:
+            path: /run/log/journal
+            type: DirectoryOrCreate
+        - name: host-sys
+          hostPath:
+            path: /sys
+        - name: host-proc
+          hostPath:
+            path: /proc
+
+      terminationGracePeriodSeconds: 30
+---
+# Service to expose the API within the cluster
+apiVersion: v1
+kind: Service
+metadata:
+  name: crashpilot
+  namespace: crashpilot
+  labels:
+    app.kubernetes.io/name: crashpilot
+spec:
+  selector:
+    app.kubernetes.io/name: crashpilot
+  ports:
+    - name: api
+      port: 7878
+      targetPort: 7878
+      protocol: TCP
+  type: ClusterIP
