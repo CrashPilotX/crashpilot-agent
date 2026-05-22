@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,25 +15,25 @@ def _find_env_file() -> Path:
       1. $CRASHPILOT_CONFIG_DIR/.env   (explicit override)
       2. ~/.config/crashpilot/.env     (per-user install)
       3. /etc/crashpilot/.env          (system-wide / sudo install)
-    Returns the first one that exists, or the user path as default.
+    Returns the first path that exists, otherwise the user default.
     """
-    candidates = [
-        Path(os.environ["CRASHPILOT_CONFIG_DIR"]) / ".env"
-        if "CRASHPILOT_CONFIG_DIR" in os.environ else None,
-        Path.home() / ".config" / "crashpilot" / ".env",
-        Path("/etc/crashpilot/.env"),
-    ]
+    candidates: list[Path] = []
+    if "CRASHPILOT_CONFIG_DIR" in os.environ:
+        candidates.append(Path(os.environ["CRASHPILOT_CONFIG_DIR"]) / ".env")
+    candidates.append(Path.home() / ".config" / "crashpilot" / ".env")
+    candidates.append(Path("/etc/crashpilot/.env"))
+
     for p in candidates:
-        if p and p.exists():
+        if p.exists():
             return p
-    # Default (may not exist yet — pydantic-settings handles missing files)
+    # Default (may not exist yet — pydantic-settings silently skips missing files)
     return Path.home() / ".config" / "crashpilot" / ".env"
 
 
 def _default_data_dir() -> Path:
     """
-    System-wide install (root) → /opt/crashpilot/data
-    Per-user install         → ~/.local/share/crashpilot
+    System-wide install (root wrote to /opt/crashpilot) → /opt/crashpilot/data
+    Per-user install                                     → ~/.local/share/crashpilot
     """
     system_dir = Path("/opt/crashpilot/data")
     if system_dir.parent.exists() and os.access(system_dir.parent, os.W_OK):
@@ -51,9 +53,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     claude_model: str = "claude-opus-4-7"
 
-    # Storage
-    data_dir: Path = Path("")   # resolved in model_post_init
-    db_path: Path = Path("")    # resolved in model_post_init
+    # Storage — use Optional[Path] so None is unambiguously "not set yet"
+    # (Path("") evaluates to PosixPath('.') which is truthy — don't use it as sentinel)
+    data_dir: Optional[Path] = None
+    db_path: Optional[Path] = None
 
     # API server
     api_host: str = "127.0.0.1"
@@ -70,15 +73,17 @@ class Settings(BaseSettings):
     analysis_timeout: int = 120
 
     def model_post_init(self, __context: object) -> None:
-        # Resolve data_dir default if not set via env
-        if not self.data_dir or str(self.data_dir) == "":
+        # Resolve data_dir
+        if self.data_dir is None:
             object.__setattr__(self, "data_dir", _default_data_dir())
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        if not self.db_path or str(self.db_path) == "":
+        self.data_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+
+        # Resolve db_path
+        if self.db_path is None:
             object.__setattr__(self, "db_path", self.data_dir / "crashpilot.db")
 
 
-_settings: Settings | None = None
+_settings: Optional[Settings] = None
 
 
 def get_settings() -> Settings:
