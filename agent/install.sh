@@ -2,7 +2,7 @@
 # CrashPilot Universal Installer
 # Supports: Ubuntu/Debian, RHEL/CentOS/Rocky/Alma, Fedora,
 #           Arch Linux, openSUSE, Alpine, Void Linux, WSL1/2
-set -euo pipefail
+set -uo pipefail   # no -e: we handle errors explicitly so one bad package can't abort
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_DIR="${CRASHPILOT_CONFIG_DIR:-$HOME/.config/crashpilot}"
@@ -104,14 +104,16 @@ info "Init system: ${BOLD}${INIT_SYS}${RESET}"
 # ── Python check ──────────────────────────────────────────────────────────────
 section "Checking Python"
 
+_sudo() { [[ $EUID -eq 0 ]] && "$@" || sudo "$@"; }
+
 install_python() {
   case "$PKG_MGR" in
-    apt)     sudo apt-get install -y python3 python3-pip python3-venv ;;
-    dnf|yum) sudo "$PKG_MGR" install -y python3 python3-pip ;;
-    pacman)  sudo pacman -Sy --noconfirm python python-pip ;;
-    zypper)  sudo zypper install -y python3 python3-pip ;;
-    apk)     sudo apk add --no-cache python3 py3-pip ;;
-    xbps)    sudo xbps-install -Sy python3 python3-pip ;;
+    apt)     _sudo apt-get install -y python3 python3-pip python3-venv ;;
+    dnf|yum) _sudo "$PKG_MGR" install -y python3 python3-pip ;;
+    pacman)  _sudo pacman -Sy --noconfirm python python-pip ;;
+    zypper)  _sudo zypper install -y python3 python3-pip ;;
+    apk)     _sudo apk add --no-cache python3 py3-pip ;;
+    xbps)    _sudo xbps-install -Sy python3 python3-pip ;;
     *)       err "Unknown package manager — install Python 3.10+ manually"; exit 1 ;;
   esac
 }
@@ -134,39 +136,109 @@ fi
 # ── Optional system tools ─────────────────────────────────────────────────────
 section "Checking optional tools"
 
-install_optional_tools() {
-  local missing_apt=() missing_dnf=() missing_pacman=() missing_apk=()
-  declare -A TOOL_PKG_APT=( [smartctl]=smartmontools [sensors]=lm-sensors [mcelog]=mcelog )
-  declare -A TOOL_PKG_DNF=( [smartctl]=smartmontools [sensors]=lm_sensors  [mcelog]=mcelog )
-  declare -A TOOL_PKG_PACMAN=( [smartctl]=smartmontools [sensors]=lm_sensors )
-  declare -A TOOL_PKG_APK=( [smartctl]=smartmontools [sensors]=lm-sensors )
+# mcelog was removed from Ubuntu 20.04+ and Debian 11+ (kernel 5.x+).
+# rasdaemon is the modern replacement on those distros.
+_mce_package() {
+  local kernel_major
+  kernel_major=$(uname -r | cut -d. -f1)
+  if [[ "$PKG_MGR" == "apt" && "${kernel_major:-0}" -ge 5 ]]; then
+    echo "rasdaemon"
+  elif [[ "$PKG_MGR" =~ ^(dnf|yum)$ ]]; then
+    echo "rasdaemon"
+  else
+    echo "mcelog"
+  fi
+}
 
-  for tool in smartctl sensors journalctl dmesg docker nvidia-smi kubectl mcelog; do
+# Try to install a single package; never exits — returns 0/1.
+_try_install_pkg() {
+  local pkg="$1"
+  case "$PKG_MGR" in
+    apt)     _sudo apt-get install -y "$pkg" &>/dev/null && return 0 ;;
+    dnf|yum) _sudo "$PKG_MGR" install -y "$pkg" &>/dev/null && return 0 ;;
+    pacman)  _sudo pacman -Sy --noconfirm "$pkg" &>/dev/null && return 0 ;;
+    zypper)  _sudo zypper install -y "$pkg" &>/dev/null && return 0 ;;
+    apk)     _sudo apk add --no-cache "$pkg" &>/dev/null && return 0 ;;
+    xbps)    _sudo xbps-install -Sy "$pkg" &>/dev/null && return 0 ;;
+  esac
+  return 1
+}
+
+install_optional_tools() {
+  # tool → (apt-pkg  dnf-pkg  pacman-pkg  apk-pkg)
+  # "?"  = not available / skip for this distro
+  declare -A PKG_APT=(
+    [smartctl]=smartmontools
+    [sensors]=lm-sensors
+    [mcelog]="$(_mce_package)"
+  )
+  declare -A PKG_DNF=(
+    [smartctl]=smartmontools
+    [sensors]=lm_sensors
+    [mcelog]=rasdaemon
+  )
+  declare -A PKG_PACMAN=(
+    [smartctl]=smartmontools
+    [sensors]=lm_sensors
+  )
+  declare -A PKG_APK=(
+    [smartctl]=smartmontools
+    [sensors]=lm-sensors
+  )
+
+  local missing=()
+  for tool in smartctl sensors journalctl dmesg docker nvidia-smi kubectl; do
     if command -v "$tool" &>/dev/null; then
       ok "  $tool"
     else
       warn "  $tool — not found"
+      local pkg=""
       case "$PKG_MGR" in
-        apt) [[ -n "${TOOL_PKG_APT[$tool]:-}" ]] && missing_apt+=("${TOOL_PKG_APT[$tool]}") ;;
-        dnf|yum) [[ -n "${TOOL_PKG_DNF[$tool]:-}" ]] && missing_dnf+=("${TOOL_PKG_DNF[$tool]}") ;;
-        pacman) [[ -n "${TOOL_PKG_PACMAN[$tool]:-}" ]] && missing_pacman+=("${TOOL_PKG_PACMAN[$tool]}") ;;
-        apk) [[ -n "${TOOL_PKG_APK[$tool]:-}" ]] && missing_apk+=("${TOOL_PKG_APK[$tool]}") ;;
+        apt)        pkg="${PKG_APT[$tool]:-}" ;;
+        dnf|yum)    pkg="${PKG_DNF[$tool]:-}" ;;
+        pacman)     pkg="${PKG_PACMAN[$tool]:-}" ;;
+        apk)        pkg="${PKG_APK[$tool]:-}" ;;
       esac
+      [[ -n "$pkg" ]] && missing+=("$pkg")
     fi
   done
 
-  if [[ ${#missing_apt[@]} -gt 0 && "$PKG_MGR" == "apt" ]]; then
-    read -rp "Install missing packages (${missing_apt[*]})? [y/N] " ans
-    if [[ "$ans" =~ ^[Yy]$ ]]; then
-      sudo apt-get install -y "${missing_apt[@]}"
-    fi
+  # MCE tool (separate because the package name varies by kernel version)
+  local mce_pkg
+  mce_pkg="$(_mce_package)"
+  if ! command -v mcelog &>/dev/null && ! command -v rasdaemon &>/dev/null; then
+    warn "  mcelog/rasdaemon — not found"
+    missing+=("$mce_pkg")
+  else
+    ok "  mcelog/rasdaemon"
   fi
-  if [[ ${#missing_dnf[@]} -gt 0 && "$PKG_MGR" =~ ^(dnf|yum)$ ]]; then
-    read -rp "Install missing packages (${missing_dnf[*]})? [y/N] " ans
-    if [[ "$ans" =~ ^[Yy]$ ]]; then
-      sudo "$PKG_MGR" install -y "${missing_dnf[@]}"
-    fi
+
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    return
   fi
+
+  # Deduplicate
+  local -A seen=()
+  local unique=()
+  for p in "${missing[@]}"; do
+    [[ -z "${seen[$p]:-}" ]] && unique+=("$p") && seen[$p]=1
+  done
+
+  read -rp "$(echo -e "${YELLOW}Install missing packages (${unique[*]})?${RESET} [y/N] ")" ans
+  if [[ ! "$ans" =~ ^[Yy]$ ]]; then
+    warn "Skipping optional packages — some collectors will be limited"
+    return
+  fi
+
+  # Install ONE AT A TIME so a missing package doesn't block others
+  for pkg in "${unique[@]}"; do
+    printf "  Installing %-20s ... " "$pkg"
+    if _try_install_pkg "$pkg"; then
+      echo -e "${GREEN}ok${RESET}"
+    else
+      echo -e "${YELLOW}not available (skipped)${RESET}"
+    fi
+  done
 }
 
 install_optional_tools
