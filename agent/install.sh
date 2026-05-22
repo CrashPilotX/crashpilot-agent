@@ -5,10 +5,18 @@
 set -uo pipefail   # no -e: we handle errors explicitly so one bad package can't abort
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG_DIR="${CRASHPILOT_CONFIG_DIR:-$HOME/.config/crashpilot}"
-DATA_DIR="${CRASHPILOT_DATA_DIR:-$HOME/.local/share/crashpilot}"
-VENV_DIR="$DATA_DIR/venv"
 INSTALL_SYSTEMD="${INSTALL_SYSTEMD:-auto}"  # auto | yes | no
+
+# When running as root (sudo), install to system-wide paths so any user can
+# invoke `crashpilot`.  When running as a normal user, install to $HOME.
+if [[ $EUID -eq 0 ]]; then
+  CONFIG_DIR="${CRASHPILOT_CONFIG_DIR:-/etc/crashpilot}"
+  DATA_DIR="${CRASHPILOT_DATA_DIR:-/opt/crashpilot}"
+else
+  CONFIG_DIR="${CRASHPILOT_CONFIG_DIR:-$HOME/.config/crashpilot}"
+  DATA_DIR="${CRASHPILOT_DATA_DIR:-$HOME/.local/share/crashpilot}"
+fi
+VENV_DIR="$DATA_DIR/venv"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -268,7 +276,8 @@ fi
 section "Setting up configuration"
 
 mkdir -p "$CONFIG_DIR" "$DATA_DIR"
-chmod 700 "$CONFIG_DIR"
+# Root installs: config dir world-readable so any user can run crashpilot
+[[ $EUID -eq 0 ]] && chmod 755 "$CONFIG_DIR" || chmod 700 "$CONFIG_DIR"
 
 if [[ ! -f "$CONFIG_DIR/.env" ]]; then
   cat > "$CONFIG_DIR/.env" << 'ENVEOF'
@@ -303,14 +312,46 @@ fi
 # ── Install Python package ────────────────────────────────────────────────────
 section "Installing CrashPilot"
 
-# Always use a venv — respects PEP 668 (externally managed environments)
-info "Creating virtual environment at $VENV_DIR..."
-python3 -m venv "$VENV_DIR"
-"$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet -e "$REPO_DIR/agent"
-ok "CrashPilot installed in venv"
+# Ensure python3-venv is present (Ubuntu splits it into a separate package)
+if ! python3 -m venv --help &>/dev/null; then
+  info "Installing python3-venv..."
+  _try_install_pkg python3-venv || _try_install_pkg python3-full || true
+fi
 
-# Create wrapper in /usr/local/bin (requires root) or ~/.local/bin
+info "Creating virtual environment at $VENV_DIR..."
+mkdir -p "$DATA_DIR"
+if ! python3 -m venv "$VENV_DIR"; then
+  err "python3 -m venv failed. Installing python3-venv / python3-full..."
+  _try_install_pkg python3-venv || true
+  _try_install_pkg python3-full || true
+  python3 -m venv "$VENV_DIR" || { err "Cannot create venv — install python3-venv manually"; exit 1; }
+fi
+
+# Bootstrap pip — Ubuntu 24.04 venvs sometimes ship without it
+if [[ ! -x "$VENV_DIR/bin/pip" ]]; then
+  info "pip missing from venv — bootstrapping with ensurepip..."
+  "$VENV_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null || \
+  curl -sSf https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR/bin/python3" || \
+  { err "Cannot bootstrap pip — install python3-pip manually"; exit 1; }
+fi
+
+info "Upgrading pip..."
+"$VENV_DIR/bin/pip" install --quiet --upgrade pip || true
+
+info "Installing CrashPilot package..."
+if ! "$VENV_DIR/bin/pip" install --quiet -e "$REPO_DIR/agent"; then
+  err "pip install failed — check output above"
+  exit 1
+fi
+
+# Verify the binary exists before declaring success
+if [[ ! -x "$VENV_DIR/bin/crashpilot" ]]; then
+  err "crashpilot binary not found in venv after install — something went wrong"
+  exit 1
+fi
+ok "CrashPilot installed in venv: $VENV_DIR"
+
+# Create a wrapper script in a system PATH location
 WRAPPER_INSTALLED=0
 create_wrapper() {
   local target="$1"
@@ -324,7 +365,10 @@ WRAPPER
 }
 
 if [[ $EUID -eq 0 ]]; then
+  # System-wide install: /usr/local/bin is readable by all users
   create_wrapper /usr/local/bin/crashpilot
+  # Make the venv readable by all users (it lives in /opt/crashpilot)
+  chmod -R a+rX "$DATA_DIR"
   ok "Installed wrapper: /usr/local/bin/crashpilot"
   WRAPPER_INSTALLED=1
 else
@@ -333,9 +377,8 @@ else
   create_wrapper "$LOCAL_BIN/crashpilot"
   ok "Installed wrapper: $LOCAL_BIN/crashpilot"
   WRAPPER_INSTALLED=1
-  # Ensure ~/.local/bin is in PATH
   if [[ ":$PATH:" != *":$LOCAL_BIN:"* ]]; then
-    warn "Add $LOCAL_BIN to PATH: export PATH=\"\$HOME/.local/bin:\$PATH\""
+    warn "Add to PATH: export PATH=\"\$HOME/.local/bin:\$PATH\""
   fi
 fi
 
