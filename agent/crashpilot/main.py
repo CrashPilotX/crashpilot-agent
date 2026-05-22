@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from pathlib import Path
-from typing import Optional
 
 import typer
 import uvicorn
@@ -14,7 +12,6 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.table import Table
-from rich import print as rprint
 
 app = typer.Typer(
     name="crashpilot",
@@ -45,7 +42,6 @@ def analyze(
     _setup_logging(verbose)
 
     from .monitor import check_and_analyze
-    from .storage.store import init_db
 
     console.print(Panel.fit(
         "[bold cyan]CrashPilot[/bold cyan] — AI Crash Forensics",
@@ -108,7 +104,6 @@ def analyze(
         table.add_column("Weight", justify="center", width=8)
         for ev in evidence[:8]:
             weight = ev.get("weight", 0)
-            weight_bar = "█" * int(weight * 10) + "░" * (10 - int(weight * 10))
             table.add_row(
                 ev.get("source", ""),
                 ev.get("interpretation", ev.get("excerpt", ""))[:80],
@@ -128,7 +123,7 @@ def analyze(
                 console.print(f"      [dim]{step['rationale']}[/dim]")
 
     console.print()
-    console.print(f"[dim]Report saved to database. Run [bold]crashpilot serve[/bold] to view in browser.[/dim]")
+    console.print("[dim]Report saved to database. Run [bold]crashpilot serve[/bold] to view in browser.[/dim]")
 
 
 @app.command()
@@ -164,7 +159,8 @@ def list_reports(
     limit: int = typer.Option(10, "--limit", "-n", help="Number of reports to show"),
 ) -> None:
     """[bold]List[/bold] stored crash reports."""
-    from .storage.store import init_db, list_reports as _list
+    from .storage.store import init_db
+    from .storage.store import list_reports as _list
     init_db()
 
     reports = _list(limit=limit)
@@ -203,8 +199,8 @@ def list_reports(
 @app.command()
 def install_service() -> None:
     """[bold]Install[/bold] the CrashPilot systemd service (requires root)."""
-    import subprocess
     import shutil
+    import subprocess
 
     # __file__ = <project>/agent/crashpilot/main.py  →  .parent×3 = <project>/
     service_src = Path(__file__).parent.parent.parent / "systemd" / "crashpilot.service"

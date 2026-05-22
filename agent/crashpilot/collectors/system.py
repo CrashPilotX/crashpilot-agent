@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -85,7 +84,7 @@ class SystemCollector(BaseCollector):
             "--grep=AER|PCIe.*error|Corrected error|Uncorrected.*error",
             timeout=20,
         )
-        lines = [l for l in stdout.splitlines() if l.strip()]
+        lines = [line for line in stdout.splitlines() if line.strip()]
         return lines[:100]
 
     async def _collect_last_reboot(self) -> dict:

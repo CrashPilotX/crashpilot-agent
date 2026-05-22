@@ -5,12 +5,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
-from pathlib import Path
 from typing import Generator
 
 from ..config import get_settings
-
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS crash_reports (

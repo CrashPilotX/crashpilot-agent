@@ -11,9 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ..config import get_settings
 from ..storage.store import (
+    cleanup_old_reports,
     count_reports,
     delete_report,
-    cleanup_old_reports,
     get_report,
     init_db,
     list_reports,

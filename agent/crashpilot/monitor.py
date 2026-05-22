@@ -21,19 +21,26 @@ from typing import Any
 from .analyzers.ai_analyzer import analyze_crash
 from .analyzers.crash_detector import CrashType, detect_crash_type
 from .analyzers.timeline import build_timeline
-from .collectors.platform import PlatformType, detect_platform
 from .collectors.dmesg import DmesgCollector
 from .collectors.docker import DockerCollector
 from .collectors.gpu import GpuCollector
 from .collectors.journal import JournalCollector
 from .collectors.kubernetes import KubernetesCollector
+from .collectors.platform import PlatformType, detect_platform
 from .collectors.smart import SmartCollector
 from .collectors.system import SystemCollector
 from .collectors.thermal import ThermalCollector
 from .collectors.vm import VmCollector
 from .collectors.wsl import WslCollector
 from .config import get_settings
-from .storage.store import cleanup_old_reports, get_meta, init_db, save_report, set_meta, update_analysis
+from .storage.store import (
+    cleanup_old_reports,
+    get_meta,
+    init_db,
+    save_report,
+    set_meta,
+    update_analysis,
+)
 
 log = logging.getLogger(__name__)
 

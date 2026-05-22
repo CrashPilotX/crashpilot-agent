@@ -88,15 +88,6 @@ class WslCollector(BaseCollector):
         info: dict[str, Any] = {}
 
         # Try running PowerShell.exe from Windows (available in WSL interop)
-        ps_cmd = (
-            "powershell.exe -NoProfile -Command "
-            "\"[PSCustomObject]@{"
-            "OS=(Get-ComputerInfo).OsName;"
-            "Build=(Get-ComputerInfo).OsBuildNumber;"
-            "RAM_GB=[math]::Round((Get-ComputerInfo).CsTotalPhysicalMemory/1GB,1);"
-            "Uptime=(Get-Date)-(gcim Win32_OperatingSystem).LastBootUpTime;"
-            "} | ConvertTo-Json\""
-        )
         stdout, _, rc = await run_cmd(
             "powershell.exe", "-NoProfile", "-Command",
             "[PSCustomObject]@{"
@@ -156,9 +147,7 @@ class WslCollector(BaseCollector):
             hints.append("WSL1: Check Windows Event Viewer for System/Application errors around crash time")
 
         if version == 2:
-            # WSL2 VM memory limit
-            wsl_config = Path(os.environ.get("USERPROFILE", "C:/Users/default") + "/.wslconfig")
-            # Try to read via /mnt path
+            # Try to read .wslconfig via /mnt path to check memory limits
             for candidate in [
                 "/mnt/c/Users/" + (os.environ.get("LOGNAME", "") or "default") + "/.wslconfig",
             ]:

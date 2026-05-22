@@ -23,7 +23,6 @@ from typing import Any
 
 from .base import BaseCollector, cmd_available, run_cmd
 
-
 _IN_CLUSTER = Path("/var/run/secrets/kubernetes.io/serviceaccount/token").exists()
 
 

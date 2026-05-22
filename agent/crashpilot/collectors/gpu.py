@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from .base import BaseCollector, cmd_available, run_cmd
@@ -141,7 +140,6 @@ class GpuCollector(BaseCollector):
                 continue
             if vendor != "0x1002":  # AMD PCI vendor ID
                 continue
-            temp_path = card / "device" / "hwmon" / "*" / "temp1_input"
             temp = None
             for tp in card.glob("device/hwmon/*/temp1_input"):
                 try:

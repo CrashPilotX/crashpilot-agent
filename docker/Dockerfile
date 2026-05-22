@@ -27,8 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     smartmontools \
     # Temp sensors
     lm-sensors \
-    # Machine check exceptions
-    mcelog \
+    # Machine check exceptions (mcelog removed from Debian; rasdaemon is the replacement)
+    rasdaemon \
     # Diagnostics
     util-linux \
     procps \

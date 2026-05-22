@@ -14,7 +14,6 @@ diagnosing VM-related crashes:
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -184,8 +183,8 @@ class VmCollector(BaseCollector):
         dmesg_out, _, _ = await run_cmd(
             "dmesg", "--level=err,warn", timeout=15
         )
-        vmware_errs = [l for l in dmesg_out.splitlines()
-                       if any(k in l.lower() for k in ["vmxnet", "pvscsi", "vmw_", "vmware"])]
+        vmware_errs = [line for line in dmesg_out.splitlines()
+                       if any(k in line.lower() for k in ["vmxnet", "pvscsi", "vmw_", "vmware"])]
         info["vmware_driver_errors"] = vmware_errs[:20]
         return info
 
@@ -193,7 +192,7 @@ class VmCollector(BaseCollector):
         info: dict[str, Any] = {}
         # Hyper-V modules
         mods, _, _ = await run_cmd("lsmod", timeout=5)
-        hv_mods = [l.split()[0] for l in mods.splitlines() if l.startswith("hv_")]
+        hv_mods = [line.split()[0] for line in mods.splitlines() if line.startswith("hv_")]
         info["loaded_hv_modules"] = hv_mods
 
         # Hyper-V heartbeat
@@ -207,8 +206,8 @@ class VmCollector(BaseCollector):
 
         # dmesg Hyper-V errors
         dmesg_out, _, _ = await run_cmd("dmesg", "--level=err,warn", timeout=15)
-        hv_errs = [l for l in dmesg_out.splitlines()
-                   if any(k in l.lower() for k in ["hv_", "hyperv", "vmbus", "storvsc", "netvsc"])]
+        hv_errs = [line for line in dmesg_out.splitlines()
+                   if any(k in line.lower() for k in ["hv_", "hyperv", "vmbus", "storvsc", "netvsc"])]
         info["hyperv_driver_errors"] = hv_errs[:20]
         return info
 
@@ -216,7 +215,7 @@ class VmCollector(BaseCollector):
         info: dict[str, Any] = {}
         # virtio module list
         mods, _, _ = await run_cmd("lsmod", timeout=5)
-        virtio_mods = [l.split()[0] for l in mods.splitlines() if l.startswith("virtio")]
+        virtio_mods = [line.split()[0] for line in mods.splitlines() if line.startswith("virtio")]
         info["virtio_modules"] = virtio_mods
 
         # QEMU guest agent
@@ -226,8 +225,8 @@ class VmCollector(BaseCollector):
 
         # KVM-specific dmesg
         dmesg_out, _, _ = await run_cmd("dmesg", "--level=err,warn", timeout=15)
-        kvm_errs = [l for l in dmesg_out.splitlines()
-                    if any(k in l.lower() for k in ["kvm", "virtio", "qemu"])]
+        kvm_errs = [line for line in dmesg_out.splitlines()
+                    if any(k in line.lower() for k in ["kvm", "virtio", "qemu"])]
         info["kvm_errors"] = kvm_errs[:20]
         return info
 
@@ -237,8 +236,8 @@ class VmCollector(BaseCollector):
         """Memory balloon driver can cause OOM when hypervisor reclaims guest RAM."""
         mods, _, _ = await run_cmd("lsmod", timeout=5)
         balloon_mods = [
-            l.split()[0] for l in mods.splitlines()
-            if any(k in l for k in ["balloon", "vmmemctl"])
+            line.split()[0] for line in mods.splitlines()
+            if any(k in line for k in ["balloon", "vmmemctl"])
         ]
         # Check if balloon is actively reducing available memory
         meminfo = {}
@@ -263,8 +262,8 @@ class VmCollector(BaseCollector):
             "--grep=virtio|virt_blk|virt_net|virtio_scsi",
             timeout=20,
         )
-        return [l for l in dmesg_out.splitlines()
-                if any(k in l.lower() for k in ["error", "timeout", "reset", "failed"])][:30]
+        return [line for line in dmesg_out.splitlines()
+                if any(k in line.lower() for k in ["error", "timeout", "reset", "failed"])][:30]
 
     def _vm_crash_hints(self) -> list[str]:
         hints = []
