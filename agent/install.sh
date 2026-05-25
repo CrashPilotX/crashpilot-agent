@@ -546,9 +546,10 @@ echo "  Platform: ${BOLD}${DISTRO} ${DISTRO_VER}${RESET} | Init: ${BOLD}${INIT_S
 echo ""
 echo "  Next steps:"
 echo -e "  1. Set API key:  ${CYAN}nano $CONFIG_DIR/.env${RESET}"
-echo -e "  2. Analyze:      ${CYAN}crashpilot analyze${RESET}"
+echo -e "  2. Analyze:      ${CYAN}sudo crashpilot analyze${RESET}"
 echo -e "  3. Serve:        ${CYAN}sudo crashpilot serve${RESET}"
-echo -e "  4. Dashboard:    ${CYAN}https://kdigitalsystems.github.io/CrashPilot${RESET}"
+echo -e "  4. Get token:    ${CYAN}sudo crashpilot token${RESET}"
+echo -e "  5. Dashboard:    ${CYAN}https://kdigitalsystems.github.io/CrashPilot${RESET}"
 echo ""
 
 # Docker install tip

@@ -123,7 +123,7 @@ def analyze(
                 console.print(f"      [dim]{step['rationale']}[/dim]")
 
     console.print()
-    console.print("[dim]Report saved to database. Run [bold]crashpilot serve[/bold] to view in browser.[/dim]")
+    console.print("[dim]Report saved to database. Run [bold]sudo crashpilot serve[/bold] to view in browser.[/dim]")
 
 
 @app.command()

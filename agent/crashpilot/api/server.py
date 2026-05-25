@@ -41,7 +41,7 @@ def get_agent_token() -> str:
     token = secrets.token_urlsafe(32)
     tf.write_text(token)
     tf.chmod(0o600)
-    log.info("Generated new API token — run `crashpilot token` to view it")
+    log.info("Generated new API token — run `sudo crashpilot token` to view it")
     return token
 
 
@@ -53,7 +53,7 @@ async def _require_token(
     if credentials is None or credentials.credentials != expected:
         raise HTTPException(
             status_code=401,
-            detail="Missing or invalid token. Run `crashpilot token` on the server to get it.",
+            detail="Missing or invalid token. Run `sudo crashpilot token` on the server to get it.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     return credentials.credentials
