@@ -4,7 +4,30 @@
 #           Arch Linux, openSUSE, Alpine, Void Linux, WSL1/2
 set -uo pipefail   # no -e: we handle errors explicitly so one bad package can't abort
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# ── Locate the repo ───────────────────────────────────────────────────────────
+# When run as `bash script.sh` from inside the repo, BASH_SOURCE[0] is the
+# script file itself and REPO_DIR is its parent directory.
+# When piped in via `bash -c "$(curl ...)"` or `curl | bash`, BASH_SOURCE[0]
+# is unbound or set to "bash", so we clone the repo to a temp directory instead.
+_src="${BASH_SOURCE[0]:-}"
+if [[ -n "$_src" && "$_src" != "bash" && -f "$_src" ]]; then
+  REPO_DIR="$(cd "$(dirname "$_src")/.." && pwd)"
+else
+  # curl-pipe install: clone the repo into a temp dir
+  CLONE_DIR="$(mktemp -d)/CrashPilot"
+  echo "[info]  curl-pipe install detected — cloning repository..."
+  if command -v git &>/dev/null; then
+    git clone --depth=1 https://github.com/kdigitalsystems/CrashPilot.git "$CLONE_DIR" \
+      || { echo "[err ]  git clone failed"; exit 1; }
+  else
+    echo "[err ]  git is required for curl-pipe installs. Install it with:"
+    echo "        sudo apt-get install git   # Debian/Ubuntu"
+    echo "        sudo dnf install git       # Fedora/RHEL"
+    exit 1
+  fi
+  REPO_DIR="$CLONE_DIR"
+fi
+
 INSTALL_SYSTEMD="${INSTALL_SYSTEMD:-auto}"  # auto | yes | no
 
 # When running as root (sudo), install to system-wide paths so any user can
@@ -487,7 +510,7 @@ fi
 if command -v kubectl &>/dev/null; then
   echo ""
   info "kubectl detected — CrashPilot can also analyze Kubernetes pod crashes"
-  info "Deploy as DaemonSet: kubectl apply -k $REPO_DIR/k8s/"
+  info "See https://github.com/kdigitalsystems/CrashPilot for Kubernetes deploy instructions"
 fi
 
 # ── Test installation ─────────────────────────────────────────────────────────
@@ -527,6 +550,10 @@ echo ""
 # Docker install tip
 if [[ $IS_DOCKER -eq 0 ]]; then
   echo -e "  ${DIM}Docker deploy:      docker run --privileged -v /var/log:/var/log ghcr.io/kdigitalsystems/crashpilot${RESET}"
-  echo -e "  ${DIM}Kubernetes deploy:  kubectl apply -k $REPO_DIR/k8s/${RESET}"
   echo ""
+fi
+
+# Clean up the temp clone directory if we created one during curl-pipe install
+if [[ -n "${CLONE_DIR:-}" && -d "${CLONE_DIR:-}" ]]; then
+  rm -rf "$CLONE_DIR"
 fi
