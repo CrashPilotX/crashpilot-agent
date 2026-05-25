@@ -220,5 +220,47 @@ def install_service() -> None:
         raise typer.Exit(1)
 
 
+@app.command()
+def token(
+    regenerate: bool = typer.Option(False, "--regenerate", "-r", help="Force a new token"),
+) -> None:
+    """[bold]Show[/bold] the API token for connecting this agent to the web dashboard."""
+    from .api.server import _token_file, get_agent_token
+    from .config import get_settings
+    from .storage.store import init_db
+
+    init_db()  # ensures data_dir exists
+    cfg = get_settings()
+
+    if regenerate:
+        tf = _token_file()
+        if tf.exists():
+            tf.unlink()
+        console.print("[yellow]Regenerated token — update any connected systems.[/yellow]\n")
+
+    t = get_agent_token()
+
+    console.print()
+    console.print(Panel(
+        f"[bold cyan]{t}[/bold cyan]",
+        title="[bold]CrashPilot API Token[/bold]",
+        border_style="cyan",
+    ))
+    console.print(
+        f"\n[bold]Agent URL:[/bold] [cyan]http://<your-server-ip>:{cfg.api_port}[/cyan]"
+    )
+    console.print(
+        "\n[dim]Add this system at "
+        "[link=https://kdigitalsystems.github.io/CrashPilot]"
+        "https://kdigitalsystems.github.io/CrashPilot[/link][/dim]"
+    )
+    console.print(
+        "[dim]For remote access, expose the agent with Cloudflare Tunnel:[/dim]"
+    )
+    console.print(
+        f"[dim]  cloudflared tunnel --url http://localhost:{cfg.api_port}[/dim]\n"
+    )
+
+
 if __name__ == "__main__":
     app()

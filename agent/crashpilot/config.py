@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     confidence_threshold: float = 0.4
     analysis_timeout: int = 120
 
+    # Agent API authentication token.
+    # Leave empty to auto-generate a token on first run (stored in data_dir/agent.token).
+    # Override with CRASHPILOT_API_TOKEN env var or in .env.
+    api_token: str = ""
+
     def model_post_init(self, __context: object) -> None:
         # Resolve data_dir
         if self.data_dir is None:
