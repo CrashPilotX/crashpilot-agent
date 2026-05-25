@@ -259,15 +259,35 @@ def token(
     import socket
     import urllib.parse
 
+    def _get_outbound_ip() -> str:
+        """Return the machine's primary outbound IP (never 127.0.0.1)."""
+        try:
+            # UDP 'connect' to an external host — no data sent, but the OS
+            # picks the right source interface, giving us the real LAN IP.
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            if ip and not ip.startswith("127."):
+                return ip
+        except Exception:
+            pass
+        # Fallback: iterate interfaces
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if not ip.startswith("127."):
+                    return ip
+        except Exception:
+            pass
+        return "<your-server-ip>"
+
     if cfg.public_url:
         agent_url = cfg.public_url
         url_label = "Agent URL (public tunnel)"
     else:
-        try:
-            local_ip = socket.gethostbyname(socket.gethostname())
-        except Exception:
-            local_ip = "<your-server-ip>"
-        agent_url = f"http://{local_ip}:{cfg.api_port}"
+        agent_url = f"http://{_get_outbound_ip()}:{cfg.api_port}"
         url_label = "Agent URL (local network)"
 
     console.print(f"\n[bold]{url_label}:[/bold] [cyan]{agent_url}[/cyan]")
