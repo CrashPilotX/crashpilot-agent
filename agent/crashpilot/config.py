@@ -15,7 +15,10 @@ def _find_env_file() -> Path:
       1. $CRASHPILOT_CONFIG_DIR/.env   (explicit override)
       2. ~/.config/crashpilot/.env     (per-user install)
       3. /etc/crashpilot/.env          (system-wide / sudo install)
-    Returns the first path that exists, otherwise the user default.
+    Returns the first path that exists AND is readable by the current process.
+    Skipping unreadable files prevents PermissionError when a non-root user
+    runs `crashpilot token` after a system-wide (root) install where
+    /etc/crashpilot/.env is owned by root.
     """
     candidates: list[Path] = []
     if "CRASHPILOT_CONFIG_DIR" in os.environ:
@@ -24,7 +27,7 @@ def _find_env_file() -> Path:
     candidates.append(Path("/etc/crashpilot/.env"))
 
     for p in candidates:
-        if p.exists():
+        if p.exists() and os.access(p, os.R_OK):
             return p
     # Default (may not exist yet — pydantic-settings silently skips missing files)
     return Path.home() / ".config" / "crashpilot" / ".env"

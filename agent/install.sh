@@ -324,13 +324,20 @@ CRASHPILOT_ANALYSIS_TIMEOUT=120
 # Data storage
 # CRASHPILOT_DATA_DIR=/var/lib/crashpilot  # uncomment for system-wide install
 ENVEOF
-  chmod 600 "$CONFIG_DIR/.env"
+  # System-wide installs: 644 so all users can read config (data_dir, port, etc.)
+  # User installs: 600 (private — only the owning user needs it)
+  [[ $EUID -eq 0 ]] && chmod 644 "$CONFIG_DIR/.env" || chmod 600 "$CONFIG_DIR/.env"
   ok "Created config: $CONFIG_DIR/.env"
   echo -e "\n  ${YELLOW}ACTION REQUIRED:${RESET} Add your Anthropic API key:"
   echo -e "  ${CYAN}  nano $CONFIG_DIR/.env${RESET}"
 else
   ok "Config exists: $CONFIG_DIR/.env"
 fi
+
+# Ensure correct permissions regardless of whether config was just created or existed.
+# System-wide: 644 so non-root users can read config (needed for `crashpilot token` etc.)
+# User install: 600 (private)
+[[ $EUID -eq 0 ]] && chmod 644 "$CONFIG_DIR/.env" || chmod 600 "$CONFIG_DIR/.env"
 
 # ── Install Python package ────────────────────────────────────────────────────
 section "Installing CrashPilot"
@@ -540,9 +547,9 @@ fi
 echo ""
 echo -e "${GREEN}${BOLD}✓ Installation complete!${RESET}"
 echo ""
-echo "  Platform: ${BOLD}${DISTRO} ${DISTRO_VER}${RESET} | Init: ${BOLD}${INIT_SYS}${RESET}"
-[[ $IS_WSL -eq 1 ]] && echo "  Mode: ${YELLOW}WSL ${WSL_VER}${RESET}"
-[[ $IS_CONTAINER -eq 1 ]] && echo "  Mode: ${YELLOW}Container${RESET}"
+echo -e "  Platform: ${BOLD}${DISTRO} ${DISTRO_VER}${RESET} | Init: ${BOLD}${INIT_SYS}${RESET}"
+[[ $IS_WSL -eq 1 ]] && echo -e "  Mode: ${YELLOW}WSL ${WSL_VER}${RESET}"
+[[ $IS_CONTAINER -eq 1 ]] && echo -e "  Mode: ${YELLOW}Container${RESET}"
 echo ""
 echo "  Next steps:"
 echo -e "  1. Set API key:  ${CYAN}nano $CONFIG_DIR/.env${RESET}"
