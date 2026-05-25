@@ -362,7 +362,11 @@ info "Upgrading pip..."
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip || true
 
 info "Installing CrashPilot package..."
-if ! "$VENV_DIR/bin/pip" install --quiet -e "$REPO_DIR/agent"; then
+# Use a regular (non-editable) install so the package is fully copied into the
+# venv's site-packages. An editable install (-e) would leave a .pth pointer
+# back to the source directory, which breaks when that directory is deleted
+# (e.g. after a curl-pipe install where we cloned to a temp dir).
+if ! "$VENV_DIR/bin/pip" install --quiet "$REPO_DIR/agent"; then
   err "pip install failed — check output above"
   exit 1
 fi
