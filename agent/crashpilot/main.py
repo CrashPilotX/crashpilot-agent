@@ -246,8 +246,15 @@ def token(
         title="[bold]CrashPilot API Token[/bold]",
         border_style="cyan",
     ))
+    # Show the local IP automatically so the user knows their agent URL
+    import socket
+    try:
+        local_ip = socket.gethostbyname(socket.gethostname())
+    except Exception:
+        local_ip = "<your-server-ip>"
+
     console.print(
-        f"\n[bold]Agent URL:[/bold] [cyan]http://<your-server-ip>:{cfg.api_port}[/cyan]"
+        f"\n[bold]Agent URL (local network):[/bold] [cyan]http://{local_ip}:{cfg.api_port}[/cyan]"
     )
     console.print(
         "\n[dim]Add this system at "
@@ -255,10 +262,12 @@ def token(
         "https://kdigitalsystems.github.io/CrashPilot[/link][/dim]"
     )
     console.print(
-        "[dim]For remote access, expose the agent with Cloudflare Tunnel:[/dim]"
-    )
-    console.print(
-        f"[dim]  cloudflared tunnel --url http://localhost:{cfg.api_port}[/dim]\n"
+        "\n[bold]For remote access[/bold] — set up a permanent Cloudflare Tunnel:\n"
+        "[dim]  1. cloudflared tunnel login[/dim]\n"
+        "[dim]  2. cloudflared tunnel create crashpilot[/dim]\n"
+        "[dim]  3. Configure /etc/cloudflared/config.yml (see Install guide)[/dim]\n"
+        "[dim]  4. sudo cloudflared service install && sudo systemctl enable --now cloudflared[/dim]\n"
+        f"[dim]  Full guide: https://kdigitalsystems.github.io/CrashPilot/#/install[/dim]\n"
     )
 
 
