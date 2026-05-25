@@ -577,7 +577,11 @@ if [[ $IS_WSL -eq 0 && $IS_CONTAINER -eq 0 && "$INIT_SYS" == "systemd" && $EUID 
     fi
 
     # ② Login
-    info "Logging in to Cloudflare (a browser URL will be printed — open it on any device)..."
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}ACTION REQUIRED:${RESET} cloudflared will print a URL below."
+    echo -e "  ${BOLD}Open that URL in any browser${RESET} (your laptop, phone, etc.) and click Authorize."
+    echo -e "  This terminal will wait and continue automatically once you have authorized."
+    echo ""
     cloudflared tunnel login || { warn "cloudflared login failed — skipping tunnel setup"; }
 
     if cloudflared tunnel list 2>/dev/null | grep -q "crashpilot"; then
