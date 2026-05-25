@@ -433,9 +433,11 @@ install_systemd_services() {
   sudo cp /tmp/crashpilot-api.service "$svc_dir/crashpilot-api@.service"
   sudo systemctl daemon-reload
   sudo systemctl enable crashpilot.service
-  ok "systemd services installed"
+  sudo systemctl enable --now "crashpilot-api@root" 2>/dev/null || \
+    sudo systemctl start "crashpilot-api@root" 2>/dev/null || true
+  ok "systemd services installed and API server started"
   echo -e "  Boot analysis enabled: will run once per boot"
-  echo -e "  Start API server: ${CYAN}sudo systemctl start crashpilot-api@$USER${RESET}"
+  echo -e "  API server: running on port 7878"
 }
 
 install_openrc_services() {
@@ -543,6 +545,100 @@ else
   info "Use: $VENV_DIR/bin/crashpilot"
 fi
 
+# ── Optional: Cloudflare Tunnel for remote access ────────────────────────────
+TUNNEL_URL=""
+
+if [[ $IS_WSL -eq 0 && $IS_CONTAINER -eq 0 && "$INIT_SYS" == "systemd" && $EUID -eq 0 ]]; then
+  section "Remote access (optional)"
+  echo ""
+  read -rp "$(echo -e "${CYAN}Set up remote access via Cloudflare Tunnel?${RESET} (free, no ports to open, URL never changes) [y/N] ")" _do_tunnel
+  if [[ "$_do_tunnel" =~ ^[Yy]$ ]]; then
+
+    # ① Install cloudflared
+    if command -v cloudflared &>/dev/null; then
+      ok "cloudflared already installed"
+    else
+      info "Installing cloudflared..."
+      if [[ "$PKG_MGR" == "apt" ]]; then
+        curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+          | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+        echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" \
+          | sudo tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
+        sudo apt-get update -qq && sudo apt-get install -y cloudflared \
+          && ok "cloudflared installed via apt"
+      else
+        _CF_ARCH="amd64"
+        case "$(uname -m)" in aarch64|arm64) _CF_ARCH="arm64";; armv7l|armv6l) _CF_ARCH="arm";; esac
+        sudo wget -q \
+          "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${_CF_ARCH}" \
+          -O /usr/local/bin/cloudflared && sudo chmod +x /usr/local/bin/cloudflared \
+          && ok "cloudflared installed (binary)"
+      fi
+    fi
+
+    # ② Login
+    info "Logging in to Cloudflare (a browser URL will be printed — open it on any device)..."
+    cloudflared tunnel login || { warn "cloudflared login failed — skipping tunnel setup"; }
+
+    if cloudflared tunnel list 2>/dev/null | grep -q "crashpilot"; then
+      info "Tunnel 'crashpilot' already exists — reusing it"
+    else
+      info "Creating named tunnel 'crashpilot'..."
+      cloudflared tunnel create crashpilot
+    fi
+
+    # ③ Get tunnel ID → permanent URL
+    _TUNNEL_ID=$(cloudflared tunnel list 2>/dev/null | awk '/crashpilot/{print $1}' | head -1)
+    if [[ -z "$_TUNNEL_ID" ]]; then
+      warn "Could not determine tunnel ID — skipping tunnel config"
+    else
+      TUNNEL_URL="https://${_TUNNEL_ID}.cfargotunnel.com"
+
+      # ④ Write config
+      sudo mkdir -p /etc/cloudflared
+      sudo tee /etc/cloudflared/config.yml >/dev/null <<CFEOF
+tunnel: crashpilot
+credentials-file: /root/.cloudflared/${_TUNNEL_ID}.json
+ingress:
+  - service: http://localhost:${CRASHPILOT_API_PORT:-7878}
+CFEOF
+
+      # ⑤ Install as systemd service
+      sudo cloudflared service install 2>/dev/null || true
+      sudo systemctl enable --now cloudflared 2>/dev/null || true
+      ok "Cloudflare Tunnel running: ${TUNNEL_URL}"
+
+      # Store in .env so 'crashpilot token' picks it up
+      if grep -q "CRASHPILOT_PUBLIC_URL" "$CONFIG_DIR/.env" 2>/dev/null; then
+        sudo sed -i "s|CRASHPILOT_PUBLIC_URL=.*|CRASHPILOT_PUBLIC_URL=${TUNNEL_URL}|" "$CONFIG_DIR/.env"
+      else
+        echo "CRASHPILOT_PUBLIC_URL=${TUNNEL_URL}" | sudo tee -a "$CONFIG_DIR/.env" >/dev/null
+      fi
+    fi
+  fi
+fi
+
+# ── Build one-click dashboard link ───────────────────────────────────────────
+DASHBOARD_LINK=""
+# Give the API service a moment to write the token file if it just started
+sleep 2 2>/dev/null || true
+AGENT_TOKEN=$(sudo cat "$DATA_DIR/data/agent.token" 2>/dev/null \
+           || sudo "$VENV_DIR/bin/crashpilot" token --raw 2>/dev/null \
+           || echo "")
+
+if [[ -n "$AGENT_TOKEN" ]]; then
+  if [[ -n "$TUNNEL_URL" ]]; then
+    _AGENT_URL="$TUNNEL_URL"
+  else
+    _LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    _AGENT_URL="http://${_LOCAL_IP:-127.0.0.1}:${CRASHPILOT_API_PORT:-7878}"
+  fi
+  _ENC_URL=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=''))" "$_AGENT_URL" 2>/dev/null || echo "")
+  if [[ -n "$_ENC_URL" ]]; then
+    DASHBOARD_LINK="https://kdigitalsystems.github.io/CrashPilot/#/add?url=${_ENC_URL}&token=${AGENT_TOKEN}"
+  fi
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}${BOLD}✓ Installation complete!${RESET}"
@@ -552,11 +648,19 @@ echo -e "  Platform: ${BOLD}${DISTRO} ${DISTRO_VER}${RESET} | Init: ${BOLD}${INI
 [[ $IS_CONTAINER -eq 1 ]] && echo -e "  Mode: ${YELLOW}Container${RESET}"
 echo ""
 echo "  Next steps:"
-echo -e "  1. Set API key:  ${CYAN}nano $CONFIG_DIR/.env${RESET}"
-echo -e "  2. Analyze:      ${CYAN}sudo crashpilot analyze${RESET}"
-echo -e "  3. Serve:        ${CYAN}sudo crashpilot serve${RESET}"
-echo -e "  4. Get token:    ${CYAN}sudo crashpilot token${RESET}"
-echo -e "  5. Dashboard:    ${CYAN}https://kdigitalsystems.github.io/CrashPilot${RESET}"
+echo -e "  1. Add your Anthropic API key:  ${CYAN}nano $CONFIG_DIR/.env${RESET}"
+if [[ -n "$DASHBOARD_LINK" ]]; then
+  echo ""
+  echo -e "  ${GREEN}${BOLD}2. Add this machine to your dashboard — click or copy this link:${RESET}"
+  echo ""
+  echo -e "  ${CYAN}${DASHBOARD_LINK}${RESET}"
+  echo ""
+  echo -e "  ${DIM}(Or run: sudo crashpilot token — to generate a fresh link any time)${RESET}"
+else
+  echo -e "  2. Start API server:  ${CYAN}sudo systemctl enable --now crashpilot-api@root${RESET}"
+  echo -e "  3. Add to dashboard:  ${CYAN}sudo crashpilot token${RESET} — click the link it prints"
+  echo -e "  4. Dashboard:         ${CYAN}https://kdigitalsystems.github.io/CrashPilot${RESET}"
+fi
 echo ""
 
 # Docker install tip

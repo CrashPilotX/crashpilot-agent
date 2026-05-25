@@ -223,6 +223,7 @@ def install_service() -> None:
 @app.command()
 def token(
     regenerate: bool = typer.Option(False, "--regenerate", "-r", help="Force a new token"),
+    raw: bool = typer.Option(False, "--raw", help="Print bare token only (for scripting)"),
 ) -> None:
     """[bold]Show[/bold] the API token for connecting this agent to the web dashboard."""
     from .api.server import _token_file, get_agent_token
@@ -236,9 +237,15 @@ def token(
         tf = _token_file()
         if tf.exists():
             tf.unlink()
-        console.print("[yellow]Regenerated token — update any connected systems.[/yellow]\n")
+        if not raw:
+            console.print("[yellow]Regenerated token — update any connected systems.[/yellow]\n")
 
     t = get_agent_token()
+
+    # --raw: just print the token, nothing else (used by install.sh)
+    if raw:
+        print(t)
+        return
 
     console.print()
     console.print(Panel(
@@ -246,29 +253,44 @@ def token(
         title="[bold]CrashPilot API Token[/bold]",
         border_style="cyan",
     ))
-    # Show the local IP automatically so the user knows their agent URL
-    import socket
-    try:
-        local_ip = socket.gethostbyname(socket.gethostname())
-    except Exception:
-        local_ip = "<your-server-ip>"
 
-    console.print(
-        f"\n[bold]Agent URL (local network):[/bold] [cyan]http://{local_ip}:{cfg.api_port}[/cyan]"
+    # Determine agent URL: prefer configured public_url (cloudflare tunnel),
+    # fall back to local IP
+    import socket
+    import urllib.parse
+
+    if cfg.public_url:
+        agent_url = cfg.public_url
+        url_label = "Agent URL (public tunnel)"
+    else:
+        try:
+            local_ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            local_ip = "<your-server-ip>"
+        agent_url = f"http://{local_ip}:{cfg.api_port}"
+        url_label = "Agent URL (local network)"
+
+    console.print(f"\n[bold]{url_label}:[/bold] [cyan]{agent_url}[/cyan]")
+
+    # Build one-click deep link
+    encoded_url = urllib.parse.quote(agent_url, safe="")
+    deep_link = (
+        f"https://kdigitalsystems.github.io/CrashPilot/#/add"
+        f"?url={encoded_url}&token={t}"
     )
-    console.print(
-        "\n[dim]Add this system at "
-        "[link=https://kdigitalsystems.github.io/CrashPilot]"
-        "https://kdigitalsystems.github.io/CrashPilot[/link][/dim]"
-    )
-    console.print(
-        "\n[bold]For remote access[/bold] — set up a permanent Cloudflare Tunnel:\n"
-        "[dim]  1. cloudflared tunnel login[/dim]\n"
-        "[dim]  2. cloudflared tunnel create crashpilot[/dim]\n"
-        "[dim]  3. Configure /etc/cloudflared/config.yml (see Install guide)[/dim]\n"
-        "[dim]  4. sudo cloudflared service install && sudo systemctl enable --now cloudflared[/dim]\n"
-        f"[dim]  Full guide: https://kdigitalsystems.github.io/CrashPilot/#/install[/dim]\n"
-    )
+    console.print()
+    console.print(Panel(
+        f"[bold green]Click to add this machine to your dashboard:[/bold green]\n\n"
+        f"[link={deep_link}]{deep_link}[/link]",
+        title="[bold]✨ One-click Dashboard Setup[/bold]",
+        border_style="green",
+    ))
+
+    if not cfg.public_url:
+        console.print(
+            "\n[dim]For remote access, set up a Cloudflare Tunnel and re-run this command.[/dim]\n"
+            f"[dim]Full guide: https://kdigitalsystems.github.io/CrashPilot/#/install[/dim]\n"
+        )
 
 
 if __name__ == "__main__":

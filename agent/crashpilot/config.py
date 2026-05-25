@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     # Override with CRASHPILOT_API_TOKEN env var or in .env.
     api_token: str = ""
 
+    # Public URL of this agent (e.g. a Cloudflare Tunnel URL).
+    # Set automatically by install.sh when cloudflared is configured.
+    # Used by `crashpilot token` to build the one-click dashboard link.
+    public_url: str = ""
+
     def model_post_init(self, __context: object) -> None:
         # Resolve data_dir
         if self.data_dir is None:
