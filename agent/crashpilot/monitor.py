@@ -278,6 +278,20 @@ async def check_and_analyze(force: bool = False) -> dict | None:
         if removed:
             log.info("Pruned %d report(s) older than %d days", removed, cfg.max_report_age_days)
 
+    # Push to Supabase cloud if configured (push mode — no public URL needed)
+    if cfg.supabase_url and cfg.supabase_system_id and cfg.supabase_token:
+        try:
+            from .cloud_push import push_report as cloud_push_report
+            await cloud_push_report(
+                supabase_url=cfg.supabase_url,
+                anon_key=cfg.supabase_anon_key,
+                system_id=cfg.supabase_system_id,
+                agent_token=cfg.supabase_token,
+                report=report,
+            )
+        except Exception as exc:
+            log.warning("Could not push report to Supabase: %s", exc)
+
     return report
 
 

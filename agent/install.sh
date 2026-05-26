@@ -435,6 +435,17 @@ install_systemd_services() {
   sudo systemctl enable crashpilot.service
   sudo systemctl enable --now "crashpilot-api@root" 2>/dev/null || \
     sudo systemctl start "crashpilot-api@root" 2>/dev/null || true
+
+  # Install heartbeat timer (starts automatically when push mode is configured)
+  if [[ -f "$service_src/crashpilot-heartbeat.service" && -f "$service_src/crashpilot-heartbeat.timer" ]]; then
+    sed "s|__CRASHPILOT_BIN__|$VENV_DIR/bin/crashpilot|g" \
+      "$service_src/crashpilot-heartbeat.service" > /tmp/crashpilot-heartbeat.service
+    sudo cp /tmp/crashpilot-heartbeat.service "$svc_dir/crashpilot-heartbeat.service"
+    sudo cp "$service_src/crashpilot-heartbeat.timer" "$svc_dir/crashpilot-heartbeat.timer"
+    sudo systemctl daemon-reload
+    sudo systemctl enable crashpilot-heartbeat.timer 2>/dev/null || true
+  fi
+
   ok "systemd services installed and API server started"
   echo -e "  Boot analysis enabled: will run once per boot"
   echo -e "  API server: running on port 7878"
@@ -661,9 +672,15 @@ if [[ -n "$DASHBOARD_LINK" ]]; then
   echo ""
   echo -e "  ${DIM}(Or run: sudo crashpilot token — to generate a fresh link any time)${RESET}"
 else
-  echo -e "  2. Start API server:  ${CYAN}sudo systemctl enable --now crashpilot-api@root${RESET}"
-  echo -e "  3. Add to dashboard:  ${CYAN}sudo crashpilot token${RESET} — click the link it prints"
-  echo -e "  4. Dashboard:         ${CYAN}https://kdigitalsystems.github.io/CrashPilot${RESET}"
+  echo ""
+  echo -e "  ${BOLD}2. Add to dashboard (two options):${RESET}"
+  echo ""
+  echo -e "     ${GREEN}Option A — Push mode (recommended, no Cloudflare needed):${RESET}"
+  echo -e "     Go to ${CYAN}https://kdigitalsystems.github.io/CrashPilot/#/systems${RESET}"
+  echo -e "     Click [Add system] → copy the configure command → run it here"
+  echo ""
+  echo -e "     ${DIM}Option B — Direct mode (requires Cloudflare Tunnel):${RESET}"
+  echo -e "     ${DIM}sudo crashpilot token  →  click the link it prints${RESET}"
 fi
 echo ""
 

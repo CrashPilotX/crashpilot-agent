@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     # Used by `crashpilot token` to build the one-click dashboard link.
     public_url: str = ""
 
+    # Cloud push mode — set by `crashpilot configure <connection-string>`.
+    # When configured, the agent pushes heartbeats and reports to Supabase
+    # instead of waiting to be polled (no public URL / Cloudflare needed).
+    supabase_url: str = ""
+    supabase_anon_key: str = ""
+    supabase_system_id: str = ""
+    supabase_token: str = ""  # agent token stored in the Supabase systems table
+
     def model_post_init(self, __context: object) -> None:
         # Resolve data_dir
         if self.data_dir is None:

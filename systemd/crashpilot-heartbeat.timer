@@ -1,0 +1,12 @@
+[Unit]
+Description=CrashPilot Cloud Heartbeat Timer
+After=network-online.target
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=60
+Unit=crashpilot-heartbeat.service
+AccuracySec=10
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=CrashPilot Cloud Heartbeat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=__CRASHPILOT_BIN__ heartbeat
+# Silent exit on success or if push mode not configured
+SuccessExitStatus=0 1

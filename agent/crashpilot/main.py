@@ -313,5 +313,95 @@ def token(
         )
 
 
+@app.command()
+def configure(
+    connection_string: str = typer.Argument(..., help="Connection string from the CrashPilot dashboard (starts with cpilot_)"),
+) -> None:
+    """[bold]Configure[/bold] push mode using the connection string from the dashboard."""
+    import base64
+    import json
+    import re
+
+    # Strip prefix
+    raw = connection_string.strip()
+    if raw.startswith("cpilot_"):
+        raw = raw[len("cpilot_"):]
+
+    try:
+        decoded = base64.b64decode(raw + "==").decode()
+        cfg_data = json.loads(decoded)
+    except Exception as e:
+        console.print(f"[red]Invalid connection string: {e}[/red]")
+        raise typer.Exit(1)
+
+    required = ("url", "key", "system_id", "token")
+    missing = [k for k in required if not cfg_data.get(k)]
+    if missing:
+        console.print(f"[red]Connection string missing fields: {missing}[/red]")
+        raise typer.Exit(1)
+
+    from .config import get_settings, _find_env_file
+    import subprocess
+
+    cfg = get_settings()
+    env_path = _find_env_file()
+
+    lines_to_add = {
+        "CRASHPILOT_SUPABASE_URL": cfg_data["url"],
+        "CRASHPILOT_SUPABASE_ANON_KEY": cfg_data["key"],
+        "CRASHPILOT_SUPABASE_SYSTEM_ID": cfg_data["system_id"],
+        "CRASHPILOT_SUPABASE_TOKEN": cfg_data["token"],
+    }
+
+    # Read existing .env
+    existing = ""
+    if env_path.exists():
+        existing = env_path.read_text()
+
+    new_lines = []
+    for key, value in lines_to_add.items():
+        pattern = re.compile(rf"^{key}=.*", re.MULTILINE)
+        if pattern.search(existing):
+            existing = pattern.sub(f"{key}={value}", existing)
+        else:
+            new_lines.append(f"{key}={value}")
+
+    content = existing.rstrip("\n") + "\n" + "\n".join(new_lines) + "\n"
+    env_path.write_text(content)
+
+    console.print(f"[green]✓[/green] Push mode configured — credentials saved to {env_path}")
+    console.print()
+    console.print("[bold]Next:[/bold] Enable the heartbeat timer so CrashPilot stays online:")
+    console.print("  [cyan]sudo systemctl enable --now crashpilot-heartbeat.timer[/cyan]")
+    console.print()
+    console.print("[dim]The agent will now push heartbeats and crash reports directly to the dashboard — no Cloudflare needed.[/dim]")
+
+
+@app.command()
+def heartbeat() -> None:
+    """[bold]Send[/bold] a heartbeat to the CrashPilot cloud (called by the systemd timer)."""
+    import asyncio
+    from .config import get_settings
+
+    cfg = get_settings()
+    if not (cfg.supabase_url and cfg.supabase_system_id and cfg.supabase_token):
+        # Not configured for push mode — exit silently (timer is a no-op)
+        raise typer.Exit(0)
+
+    from .cloud_push import push_heartbeat
+
+    try:
+        asyncio.run(push_heartbeat(
+            supabase_url=cfg.supabase_url,
+            anon_key=cfg.supabase_anon_key,
+            system_id=cfg.supabase_system_id,
+            agent_token=cfg.supabase_token,
+        ))
+    except Exception as e:
+        # Log but don't crash — timer will retry in 60s
+        logging.getLogger(__name__).warning("Heartbeat failed: %s", e)
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()
