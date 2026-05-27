@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..config import get_settings
@@ -187,14 +188,15 @@ async def get_crash_report(
     }
 
 
-@app.delete("/api/v1/reports/{report_id}", status_code=204)
+@app.delete("/api/v1/reports/{report_id}")
 async def delete_crash_report(
     report_id: str,
     _: str = Depends(_require_token),
-) -> None:
-    """Delete a crash report by ID."""
+) -> Response:
+    """Delete a crash report by ID. Returns 204 No Content on success."""
     if not delete_report(report_id):
         raise HTTPException(status_code=404, detail=f"Report {report_id!r} not found")
+    return Response(status_code=204)
 
 
 @app.get("/api/v1/status")

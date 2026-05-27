@@ -32,6 +32,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "httpx>=0.28.0",        # required by FastAPI TestClient
+    "respx>=0.21",          # mock httpx calls in tests
     "mypy>=1.13",
     "ruff>=0.8",
 ]
