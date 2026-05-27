@@ -225,7 +225,7 @@ def token(
     regenerate: bool = typer.Option(False, "--regenerate", "-r", help="Force a new token"),
     raw: bool = typer.Option(False, "--raw", help="Print bare token only (for scripting)"),
 ) -> None:
-    """[bold]Show[/bold] the API token for connecting this agent to the web dashboard."""
+    """[bold]Show[/bold] connection status and the direct-mode API token."""
     from .api.server import _token_file, get_agent_token
     from .config import get_settings
     from .storage.store import init_db
@@ -238,78 +238,83 @@ def token(
         if tf.exists():
             tf.unlink()
         if not raw:
-            console.print("[yellow]Regenerated token — update any connected systems.[/yellow]\n")
+            console.print("[yellow]Regenerated direct-mode token — update any connected systems.[/yellow]\n")
 
     t = get_agent_token()
 
-    # --raw: just print the token, nothing else (used by install.sh)
+    # --raw: just print the token, nothing else (used by scripting)
     if raw:
         print(t)
         return
 
+    dashboard = "https://kdigitalsystems.github.io/CrashPilot"
+
+    # ── Push mode (recommended) ──────────────────────────────────────────────
+    push_configured = bool(cfg.supabase_url and cfg.supabase_system_id and cfg.supabase_token)
+
+    if push_configured:
+        console.print()
+        console.print(Panel(
+            f"[bold green]✓ Push mode is active[/bold green]\n\n"
+            f"  System ID : [dim]{cfg.supabase_system_id}[/dim]\n"
+            f"  Supabase  : [dim]{cfg.supabase_url}[/dim]\n\n"
+            f"  The agent pushes heartbeats every 60 s and reports after each analysis.\n"
+            f"  View your dashboard at [link={dashboard}]{dashboard}[/link]",
+            title="[bold]CrashPilot Status[/bold]",
+            border_style="green",
+        ))
+        console.print()
+        console.print(
+            "[dim]To send a heartbeat now: [/dim][cyan]sudo crashpilot heartbeat[/cyan]\n"
+            "[dim]To run an analysis:       [/dim][cyan]sudo crashpilot analyze[/cyan]\n"
+        )
+        return
+
+    # ── Push mode not configured — guide the user ────────────────────────────
     console.print()
+    console.print(Panel(
+        f"[bold yellow]Push mode not configured yet[/bold yellow]\n\n"
+        f"  Push mode is the recommended way to connect — no public URL or\n"
+        f"  Cloudflare tunnel needed. The agent connects outbound to the cloud.\n\n"
+        f"  [bold]To set it up:[/bold]\n"
+        f"  1. Go to [link={dashboard}]{dashboard}[/link]\n"
+        f"     Sign in → Systems → Add system → Push mode\n"
+        f"  2. Copy the configure command and run it here:\n"
+        f"     [cyan]sudo crashpilot configure cpilot_<connection-string>[/cyan]",
+        title="[bold]CrashPilot — Connect to Dashboard[/bold]",
+        border_style="yellow",
+    ))
+
+    # ── Direct mode info (secondary / advanced) ──────────────────────────────
+    console.print()
+    console.print("[dim]─── Direct mode (advanced — requires an HTTPS URL) ───────────────────[/dim]")
+    console.print(
+        "[dim]If you have a Cloudflare Tunnel or another HTTPS reverse proxy, you can\n"
+        "use the bearer token below with [bold]Systems → Add system → Direct mode[/bold].[/dim]\n"
+    )
     console.print(Panel(
         f"[bold cyan]{t}[/bold cyan]",
-        title="[bold]CrashPilot API Token[/bold]",
-        border_style="cyan",
+        title="[bold]Direct-mode API Token[/bold]",
+        border_style="dim",
     ))
-
-    # Determine agent URL: prefer configured public_url (cloudflare tunnel),
-    # fall back to local IP
-    import socket
-    import urllib.parse
-
-    def _get_outbound_ip() -> str:
-        """Return the machine's primary outbound IP (never 127.0.0.1)."""
-        try:
-            # UDP 'connect' to an external host — no data sent, but the OS
-            # picks the right source interface, giving us the real LAN IP.
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(0)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            if ip and not ip.startswith("127."):
-                return ip
-        except Exception:
-            pass
-        # Fallback: iterate interfaces
-        try:
-            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-                ip = info[4][0]
-                if not ip.startswith("127."):
-                    return ip
-        except Exception:
-            pass
-        return "<your-server-ip>"
 
     if cfg.public_url:
-        agent_url = cfg.public_url
-        url_label = "Agent URL (public tunnel)"
+        import urllib.parse
+        encoded_url = urllib.parse.quote(cfg.public_url, safe="")
+        deep_link = f"{dashboard}/#/add?url={encoded_url}&token={t}"
+        console.print()
+        console.print(Panel(
+            f"[bold green]One-click add (HTTPS tunnel detected):[/bold green]\n\n"
+            f"[link={deep_link}]{deep_link}[/link]",
+            title="[bold]✨ One-click Setup[/bold]",
+            border_style="green",
+        ))
     else:
-        agent_url = f"http://{_get_outbound_ip()}:{cfg.api_port}"
-        url_label = "Agent URL (local network)"
-
-    console.print(f"\n[bold]{url_label}:[/bold] [cyan]{agent_url}[/cyan]")
-
-    # Build one-click deep link
-    encoded_url = urllib.parse.quote(agent_url, safe="")
-    deep_link = (
-        f"https://kdigitalsystems.github.io/CrashPilot/#/add"
-        f"?url={encoded_url}&token={t}"
-    )
-    console.print()
-    console.print(Panel(
-        f"[bold green]Click to add this machine to your dashboard:[/bold green]\n\n"
-        f"[link={deep_link}]{deep_link}[/link]",
-        title="[bold]✨ One-click Dashboard Setup[/bold]",
-        border_style="green",
-    ))
-
-    if not cfg.public_url:
         console.print(
-            "\n[dim]For remote access, set up a Cloudflare Tunnel and re-run this command.[/dim]\n"
-            f"[dim]Full guide: https://kdigitalsystems.github.io/CrashPilot/#/install[/dim]\n"
+            "[dim]Agent URL (local network only — not usable from the cloud dashboard):\n"
+            f"  http://<server-ip>:{cfg.api_port}[/dim]\n\n"
+            "[dim]For direct mode to work from the internet, expose the agent over HTTPS\n"
+            "(e.g. Cloudflare Tunnel) and re-run this command.[/dim]\n"
         )
 
 
