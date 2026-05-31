@@ -383,14 +383,34 @@ def configure(
 
 
 @app.command()
-def heartbeat() -> None:
+def heartbeat(
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress success output (used by the systemd timer)"),
+) -> None:
     """[bold]Send[/bold] a heartbeat to the CrashPilot cloud (called by the systemd timer)."""
     import asyncio
     from .config import get_settings
 
     cfg = get_settings()
-    if not (cfg.supabase_url and cfg.supabase_system_id and cfg.supabase_token):
-        # Not configured for push mode — exit silently (timer is a no-op)
+
+    # Push mode requires url + anon_key + system_id + token. Tell the user exactly
+    # what's missing instead of silently doing nothing.
+    missing = [
+        name for name, val in (
+            ("CRASHPILOT_SUPABASE_URL", cfg.supabase_url),
+            ("CRASHPILOT_SUPABASE_ANON_KEY", cfg.supabase_anon_key),
+            ("CRASHPILOT_SUPABASE_SYSTEM_ID", cfg.supabase_system_id),
+            ("CRASHPILOT_SUPABASE_TOKEN", cfg.supabase_token),
+        ) if not val
+    ]
+    if missing:
+        if not quiet:
+            console.print(
+                "[yellow]Push mode is not configured[/yellow] — missing: "
+                + ", ".join(missing) + "\n"
+                "Run [cyan]sudo crashpilot configure cpilot_<connection-string>[/cyan] "
+                "(get the string from the dashboard → Systems → Add system → Push mode)."
+            )
+        # Exit 0 so the systemd timer treats an unconfigured agent as a no-op.
         raise typer.Exit(0)
 
     from .cloud_push import push_heartbeat
@@ -403,9 +423,16 @@ def heartbeat() -> None:
             agent_token=cfg.supabase_token,
         ))
     except Exception as e:
-        # Log but don't crash — timer will retry in 60s
-        logging.getLogger(__name__).warning("Heartbeat failed: %s", e)
+        # Always surface the reason — for manual runs and for `journalctl` when
+        # the timer fires. Detailed text comes from cloud_push._explain_http_error.
+        console.print(f"[red]✗ Heartbeat failed:[/red] {e}")
         raise typer.Exit(1)
+
+    if not quiet:
+        console.print(
+            f"[green]✓ Heartbeat sent[/green] — system [dim]{cfg.supabase_system_id}[/dim] "
+            "is now online in the dashboard."
+        )
 
 
 if __name__ == "__main__":

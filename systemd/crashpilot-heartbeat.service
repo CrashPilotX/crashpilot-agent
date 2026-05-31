@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=__CRASHPILOT_BIN__ heartbeat
-# Silent exit on success or if push mode not configured
-SuccessExitStatus=0 1
+# --quiet: no output on success; failures still print to the journal so
+# `journalctl -u crashpilot-heartbeat.service` shows why a heartbeat failed.
+ExecStart=__CRASHPILOT_BIN__ heartbeat --quiet
+# Exit 0 = sent or not-configured (no-op). Exit 1 = a real failure we want to see.
+SuccessExitStatus=0

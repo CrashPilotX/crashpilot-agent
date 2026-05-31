@@ -76,17 +76,32 @@ class TestPushHeartbeat:
             await push_heartbeat(SUPABASE_URL + "/", ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
             assert route.called
 
-    async def test_http_error_propagates(self):
-        """Non-2xx response should raise an HTTPStatusError."""
+    async def test_http_error_raises_with_explanation(self):
+        """Non-2xx response should raise a RuntimeError carrying the server body."""
         with respx.mock:
             respx.post(HB_URL).mock(
                 return_value=httpx.Response(401, json={"message": "Invalid token"})
             )
-            with pytest.raises(httpx.HTTPStatusError):
+            with pytest.raises(RuntimeError) as excinfo:
                 await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
+            msg = str(excinfo.value)
+            assert "401" in msg
+            assert "Invalid token" in msg  # server body is surfaced
+
+    async def test_missing_rpc_error_mentions_schema(self):
+        """A 404 / missing-function error should tell the user to run schema.sql."""
+        with respx.mock:
+            respx.post(HB_URL).mock(
+                return_value=httpx.Response(
+                    404, json={"message": "Could not find the function public.agent_heartbeat"}
+                )
+            )
+            with pytest.raises(RuntimeError) as excinfo:
+                await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
+            assert "schema.sql" in str(excinfo.value)
 
     async def test_network_error_propagates(self):
-        """Network failure should raise a ConnectError."""
+        """Network failure should raise a ConnectError (not wrapped)."""
         with respx.mock:
             respx.post(HB_URL).mock(side_effect=httpx.ConnectError("connection refused"))
             with pytest.raises(httpx.ConnectError):
