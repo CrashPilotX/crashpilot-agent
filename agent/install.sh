@@ -55,6 +55,26 @@ warn()    { echo -e "${YELLOW}[warn]${RESET}  $*"; }
 err()     { echo -e "${RED}[err ]${RESET}  $*" >&2; }
 section() { echo -e "\n${BOLD}── $* ──────────────────────────────────────────${RESET}"; }
 
+# ── Parse arguments ─────────────────────────────────────────────────────────
+# --connect <cpilot_…>  : after installing, configure push mode and bring the
+#                         system online in one shot (the dashboard one-liner).
+# A bare cpilot_… positional argument is also accepted.
+# Can also be supplied via the CRASHPILOT_CONNECT environment variable.
+CONNECT_STRING="${CRASHPILOT_CONNECT:-}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --connect)      CONNECT_STRING="${2:-}"; shift 2 ;;
+    --connect=*)    CONNECT_STRING="${1#*=}"; shift ;;
+    cpilot_*)       CONNECT_STRING="$1"; shift ;;
+    -h|--help)
+      echo "Usage: install.sh [--connect cpilot_<connection-string>]"
+      echo "  --connect <string>   Install, then connect to the dashboard (push mode)."
+      echo "  (a bare cpilot_… argument or \$CRASHPILOT_CONNECT also works)"
+      exit 0 ;;
+    *)              warn "Ignoring unknown argument: $1"; shift ;;
+  esac
+done
+
 banner() {
 cat << 'EOF'
    ____               _    ____  _ _       _
@@ -556,6 +576,33 @@ else
   info "Use: $VENV_DIR/bin/crashpilot"
 fi
 
+# ── Auto-connect to the dashboard (push mode) ──────────────────────────────────
+# Triggered by the one-liner the dashboard shows:
+#   curl -fsSL .../install.sh | sudo bash -s -- --connect cpilot_<string>
+CONNECTED=0
+if [[ -n "$CONNECT_STRING" ]]; then
+  section "Connecting to dashboard"
+  if [[ -z "$CRASHPILOT_BIN" ]]; then
+    err "Cannot connect — the CrashPilot CLI is not available."
+  elif "$CRASHPILOT_BIN" configure "$CONNECT_STRING"; then
+    # Enable + start the heartbeat timer so the system stays online.
+    if [[ "$INIT_SYS" == "systemd" ]]; then
+      systemctl enable --now crashpilot-heartbeat.timer &>/dev/null || true
+    fi
+    # Send one heartbeat right away so it appears online without waiting 60s.
+    if "$CRASHPILOT_BIN" heartbeat; then
+      ok "Connected — your system is now online in the dashboard."
+    else
+      warn "Configured, but the first heartbeat failed (reason above)."
+      warn "The timer will retry every 60s."
+    fi
+    CONNECTED=1
+  else
+    err "Could not configure push mode with that connection string."
+    err "Get a fresh one from the dashboard → Systems → Add system → Push mode."
+  fi
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}${BOLD}✓ Installation complete!${RESET}"
@@ -566,21 +613,29 @@ echo -e "  Platform: ${BOLD}${DISTRO} ${DISTRO_VER}${RESET} | Init: ${BOLD}${INI
 echo ""
 echo -e "  ${BOLD}Next steps:${RESET}"
 echo ""
-echo -e "  ${BOLD}1.${RESET} Add your Anthropic API key:"
-echo -e "     ${CYAN}nano $CONFIG_DIR/.env${RESET}"
-echo ""
-echo -e "  ${BOLD}2.${RESET} Connect to the dashboard ${DIM}(no Cloudflare tunnel needed — agent connects outbound):${RESET}"
-echo -e "     a. Sign in at ${CYAN}https://kdigitalsystems.github.io/CrashPilot/${RESET}"
-echo -e "        Go to ${BOLD}Systems → Add system${RESET}, enter a name, choose ${BOLD}Push mode${RESET}"
-echo -e "        and copy the ${BOLD}configure${RESET} command shown."
-echo -e "     b. Run that command here, e.g.:"
-echo -e "        ${CYAN}sudo crashpilot configure cpilot_<connection-string>${RESET}"
-echo -e "     c. The heartbeat timer is already enabled — your system will"
-echo -e "        appear online in the dashboard within ~60 seconds."
-echo -e "        ${DIM}Not coming online? Run ${RESET}${CYAN}sudo crashpilot heartbeat${RESET}${DIM} — it prints exactly why.${RESET}"
-echo ""
-echo -e "  ${BOLD}3.${RESET} Run your first analysis:"
-echo -e "     ${CYAN}sudo crashpilot analyze${RESET}"
+if [[ $CONNECTED -eq 1 ]]; then
+  echo -e "  ${GREEN}✓ Connected to the dashboard${RESET} — view it at:"
+  echo -e "     ${CYAN}https://kdigitalsystems.github.io/CrashPilot/${RESET}"
+  echo ""
+  echo -e "  ${BOLD}1.${RESET} ${DIM}(Optional)${RESET} Add an Anthropic API key for AI root-cause analysis:"
+  echo -e "     ${CYAN}sudo nano $CONFIG_DIR/.env${RESET}   ${DIM}# set CRASHPILOT_ANTHROPIC_API_KEY${RESET}"
+  echo ""
+  echo -e "  ${BOLD}2.${RESET} Run your first analysis:"
+  echo -e "     ${CYAN}sudo crashpilot analyze${RESET}"
+else
+  echo -e "  ${BOLD}1.${RESET} Connect to the dashboard ${DIM}— one command, no open ports needed:${RESET}"
+  echo -e "     a. Sign in at ${CYAN}https://kdigitalsystems.github.io/CrashPilot/${RESET}"
+  echo -e "        Go to ${BOLD}Systems → Add system${RESET}, enter a name, choose ${BOLD}Push mode${RESET}."
+  echo -e "     b. Copy the one-line command it shows and run it here. It looks like:"
+  echo -e "        ${CYAN}curl -fsSL .../install.sh | sudo bash -s -- --connect cpilot_<string>${RESET}"
+  echo -e "        ${DIM}(or, since it's already installed: ${RESET}${CYAN}sudo crashpilot configure cpilot_<string>${RESET}${DIM})${RESET}"
+  echo ""
+  echo -e "  ${BOLD}2.${RESET} ${DIM}(Optional)${RESET} Add an Anthropic API key for AI root-cause analysis:"
+  echo -e "     ${CYAN}sudo nano $CONFIG_DIR/.env${RESET}   ${DIM}# set CRASHPILOT_ANTHROPIC_API_KEY${RESET}"
+  echo ""
+  echo -e "  ${BOLD}3.${RESET} Run your first analysis:"
+  echo -e "     ${CYAN}sudo crashpilot analyze${RESET}"
+fi
 echo ""
 
 # Docker install tip
