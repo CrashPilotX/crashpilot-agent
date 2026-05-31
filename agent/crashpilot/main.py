@@ -273,49 +273,29 @@ def token(
     # ── Push mode not configured — guide the user ────────────────────────────
     console.print()
     console.print(Panel(
-        f"[bold yellow]Push mode not configured yet[/bold yellow]\n\n"
-        f"  Push mode is the recommended way to connect — no public URL or\n"
-        f"  Cloudflare tunnel needed. The agent connects outbound to the cloud.\n\n"
-        f"  [bold]To set it up:[/bold]\n"
+        f"[bold yellow]Not connected yet[/bold yellow]\n\n"
+        f"  CrashPilot connects outbound to the dashboard — no public URL or\n"
+        f"  open ports needed.\n\n"
+        f"  [bold]To connect:[/bold]\n"
         f"  1. Go to [link={dashboard}]{dashboard}[/link]\n"
-        f"     Sign in → Systems → Add system → Push mode\n"
-        f"  2. Copy the configure command and run it here:\n"
+        f"     Sign in → Systems → Add system → enter a name → Create system\n"
+        f"  2. Run the one-line command it shows you, e.g.:\n"
         f"     [cyan]sudo crashpilot configure cpilot_<connection-string>[/cyan]",
         title="[bold]CrashPilot — Connect to Dashboard[/bold]",
         border_style="yellow",
     ))
 
-    # ── Direct mode info (secondary / advanced) ──────────────────────────────
+    # ── Local API token (for the localhost dashboard / scripting) ─────────────
     console.print()
-    console.print("[dim]─── Direct mode (advanced — requires an HTTPS URL) ───────────────────[/dim]")
     console.print(
-        "[dim]If you have a Cloudflare Tunnel or another HTTPS reverse proxy, you can\n"
-        "use the bearer token below with [bold]Systems → Add system → Direct mode[/bold].[/dim]\n"
+        "[dim]Local API token (only needed to query this agent's REST API on "
+        f"http://127.0.0.1:{cfg.api_port} directly):[/dim]"
     )
     console.print(Panel(
         f"[bold cyan]{t}[/bold cyan]",
-        title="[bold]Direct-mode API Token[/bold]",
+        title="[bold]Local API Token[/bold]",
         border_style="dim",
     ))
-
-    if cfg.public_url:
-        import urllib.parse
-        encoded_url = urllib.parse.quote(cfg.public_url, safe="")
-        deep_link = f"{dashboard}/#/add?url={encoded_url}&token={t}"
-        console.print()
-        console.print(Panel(
-            f"[bold green]One-click add (HTTPS tunnel detected):[/bold green]\n\n"
-            f"[link={deep_link}]{deep_link}[/link]",
-            title="[bold]✨ One-click Setup[/bold]",
-            border_style="green",
-        ))
-    else:
-        console.print(
-            "[dim]Agent URL (local network only — not usable from the cloud dashboard):\n"
-            f"  http://<server-ip>:{cfg.api_port}[/dim]\n\n"
-            "[dim]For direct mode to work from the internet, expose the agent over HTTPS\n"
-            "(e.g. Cloudflare Tunnel) and re-run this command.[/dim]\n"
-        )
 
 
 @app.command()
