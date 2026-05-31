@@ -585,21 +585,12 @@ if [[ -n "$CONNECT_STRING" ]]; then
   if [[ -z "$CRASHPILOT_BIN" ]]; then
     err "Cannot connect — the CrashPilot CLI is not available."
   elif "$CRASHPILOT_BIN" configure "$CONNECT_STRING"; then
-    # Enable + start the heartbeat timer so the system stays online.
-    if [[ "$INIT_SYS" == "systemd" ]]; then
-      systemctl enable --now crashpilot-heartbeat.timer &>/dev/null || true
-    fi
-    # Send one heartbeat right away so it appears online without waiting 60s.
-    if "$CRASHPILOT_BIN" heartbeat; then
-      ok "Connected — your system is now online in the dashboard."
-    else
-      warn "Configured, but the first heartbeat failed (reason above)."
-      warn "The timer will retry every 60s."
-    fi
+    # `configure` enables the heartbeat timer and sends the first heartbeat itself,
+    # so the system is online as soon as this returns.
     CONNECTED=1
   else
-    err "Could not configure push mode with that connection string."
-    err "Get a fresh one from the dashboard → Systems → Add system → Push mode."
+    err "Could not connect with that connection string."
+    err "Get a fresh one from the dashboard → Systems → Add system."
   fi
 fi
 

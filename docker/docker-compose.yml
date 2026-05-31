@@ -23,6 +23,13 @@ services:
       - CRASHPILOT_API_HOST=0.0.0.0
       - CRASHPILOT_API_PORT=7878
       - CRASHPILOT_ANALYSIS_TIMEOUT=120
+      # Push mode (connect to the dashboard): either run
+      #   docker exec crashpilot crashpilot configure cpilot_<string>
+      # or decode the connection string into these four vars:
+      - CRASHPILOT_SUPABASE_URL=${CRASHPILOT_SUPABASE_URL:-}
+      - CRASHPILOT_SUPABASE_ANON_KEY=${CRASHPILOT_SUPABASE_ANON_KEY:-}
+      - CRASHPILOT_SUPABASE_SYSTEM_ID=${CRASHPILOT_SUPABASE_SYSTEM_ID:-}
+      - CRASHPILOT_SUPABASE_TOKEN=${CRASHPILOT_SUPABASE_TOKEN:-}
 
     volumes:
       # Host log access

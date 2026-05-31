@@ -1,8 +1,11 @@
 [Unit]
 Description=CrashPilot — AI Linux Crash Forensics Agent
 Documentation=https://kdigitalsystems.github.io/CrashPilot
-After=network.target systemd-journald.service
-Wants=network.target
+# network-online.target (not just network.target) so the boot analysis can
+# actually reach Supabase to push the crash report — network.target is reached
+# before connectivity is up, which would drop the push.
+After=network-online.target systemd-journald.service
+Wants=network-online.target
 
 [Service]
 Type=oneshot

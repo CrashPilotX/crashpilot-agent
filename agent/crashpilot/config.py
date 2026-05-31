@@ -82,7 +82,7 @@ class Settings(BaseSettings):
 
     # Cloud push mode — set by `crashpilot configure <connection-string>`.
     # When configured, the agent pushes heartbeats and reports to Supabase
-    # instead of waiting to be polled (no public URL / Cloudflare needed).
+    # outbound (no public URL or open ports needed).
     supabase_url: str = ""
     supabase_anon_key: str = ""
     supabase_system_id: str = ""

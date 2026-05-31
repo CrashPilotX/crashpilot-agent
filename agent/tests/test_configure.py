@@ -34,6 +34,15 @@ def _reset_settings(monkeypatch, tmp_path):
     # Create a starter .env so configure has a file to modify
     env_file = tmp_path / ".env"
     env_file.write_text("CRASHPILOT_ANTHROPIC_API_KEY=sk-ant-existing\n")
+
+    # `configure` now auto-enables the systemd timer and sends a heartbeat.
+    # Stub both so configure tests stay network-free and never touch systemd.
+    # (Heartbeat tests override push_heartbeat with their own fakes as needed.)
+    async def _noop_heartbeat(**_):
+        return None
+    monkeypatch.setattr("crashpilot.cloud_push.push_heartbeat", _noop_heartbeat)
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
     yield
     cfg_mod._settings = None
 
@@ -99,10 +108,11 @@ class TestConfigure:
         assert result.exit_code != 0
 
     def test_success_message_shown(self):
-        """Success output should confirm credentials were saved."""
+        """Success output should confirm the agent connected / saved credentials."""
         conn_str = _make_conn_str()
         result = runner.invoke(app, ["configure", conn_str])
-        assert "Push mode configured" in result.output or "configured" in result.output.lower()
+        out = result.output.lower()
+        assert "connected" in out or "saved" in out or "configured" in out
 
 
 # ── heartbeat ─────────────────────────────────────────────────────────────────

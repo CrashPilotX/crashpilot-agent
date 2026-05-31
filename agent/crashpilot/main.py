@@ -354,12 +354,48 @@ def configure(
     content = existing.rstrip("\n") + "\n" + "\n".join(new_lines) + "\n"
     env_path.write_text(content)
 
-    console.print(f"[green]✓[/green] Push mode configured — credentials saved to {env_path}")
-    console.print()
-    console.print("[bold]Next:[/bold] Enable the heartbeat timer so CrashPilot stays online:")
-    console.print("  [cyan]sudo systemctl enable --now crashpilot-heartbeat.timer[/cyan]")
-    console.print()
-    console.print("[dim]The agent will now push heartbeats and crash reports directly to the dashboard — no Cloudflare needed.[/dim]")
+    console.print(f"[green]✓[/green] Connected — credentials saved to {env_path}")
+
+    # Reload settings so the heartbeat below picks up the new credentials.
+    import crashpilot.config as _cfg_mod
+    _cfg_mod._settings = None
+
+    # Enable + start the heartbeat timer so the system stays online (best-effort:
+    # systemd may be absent, e.g. in containers).
+    import shutil
+    import subprocess
+    timer_enabled = False
+    if shutil.which("systemctl"):
+        try:
+            subprocess.run(
+                ["systemctl", "enable", "--now", "crashpilot-heartbeat.timer"],
+                check=True, capture_output=True,
+            )
+            timer_enabled = True
+        except (subprocess.CalledProcessError, OSError):
+            pass
+
+    # Send one heartbeat now so the system appears online immediately.
+    from .cloud_push import push_heartbeat
+    cfg2 = get_settings()
+    try:
+        asyncio.run(push_heartbeat(
+            supabase_url=cfg2.supabase_url,
+            anon_key=cfg2.supabase_anon_key,
+            system_id=cfg2.supabase_system_id,
+            agent_token=cfg2.supabase_token,
+        ))
+        console.print("[green]✓[/green] Heartbeat sent — your system is now online in the dashboard.")
+    except Exception as e:
+        console.print(f"[yellow]![/yellow] Connected, but the first heartbeat failed: {e}")
+
+    if not timer_enabled:
+        console.print()
+        console.print(
+            "[dim]Heartbeat timer not enabled automatically (no systemd?). "
+            "Ensure something runs [/dim][cyan]crashpilot heartbeat[/cyan][dim] every ~60s "
+            "to stay online.[/dim]"
+        )
 
 
 @app.command()
