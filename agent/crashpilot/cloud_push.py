@@ -8,9 +8,9 @@ RPCs in Postgres (so the anon key is safe to use here).
 
 from __future__ import annotations
 
+import importlib.metadata
 import logging
 import socket
-import importlib.metadata
 from typing import Any
 
 import httpx

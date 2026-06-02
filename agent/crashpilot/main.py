@@ -306,6 +306,11 @@ def configure(
     import base64
     import json
     import re
+    import shutil
+    import subprocess
+
+    from . import config as cfg_mod
+    from .cloud_push import push_heartbeat
 
     # Strip prefix
     raw = connection_string.strip()
@@ -325,11 +330,7 @@ def configure(
         console.print(f"[red]Connection string missing fields: {missing}[/red]")
         raise typer.Exit(1)
 
-    from .config import get_settings, _find_env_file
-    import subprocess
-
-    cfg = get_settings()
-    env_path = _find_env_file()
+    env_path = cfg_mod._find_env_file()
 
     lines_to_add = {
         "CRASHPILOT_SUPABASE_URL": cfg_data["url"],
@@ -357,13 +358,10 @@ def configure(
     console.print(f"[green]✓[/green] Connected — credentials saved to {env_path}")
 
     # Reload settings so the heartbeat below picks up the new credentials.
-    import crashpilot.config as _cfg_mod
-    _cfg_mod._settings = None
+    cfg_mod._settings = None
 
     # Enable + start the heartbeat timer so the system stays online (best-effort:
     # systemd may be absent, e.g. in containers).
-    import shutil
-    import subprocess
     timer_enabled = False
     if shutil.which("systemctl"):
         try:
@@ -376,8 +374,7 @@ def configure(
             pass
 
     # Send one heartbeat now so the system appears online immediately.
-    from .cloud_push import push_heartbeat
-    cfg2 = get_settings()
+    cfg2 = cfg_mod.get_settings()
     try:
         asyncio.run(push_heartbeat(
             supabase_url=cfg2.supabase_url,
@@ -404,6 +401,7 @@ def heartbeat(
 ) -> None:
     """[bold]Send[/bold] a heartbeat to the CrashPilot cloud (called by the systemd timer)."""
     import asyncio
+
     from .config import get_settings
 
     cfg = get_settings()
