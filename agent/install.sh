@@ -628,6 +628,8 @@ else
   echo -e "     ${CYAN}sudo crashpilot analyze${RESET}"
 fi
 echo ""
+echo -e "  ${DIM}Something not working? Run ${RESET}${CYAN}sudo crashpilot doctor${RESET}${DIM} — it diagnoses config, connection, and the timer.${RESET}"
+echo ""
 
 # Docker install tip
 if [[ $IS_DOCKER -eq 0 ]]; then

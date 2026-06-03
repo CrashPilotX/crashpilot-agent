@@ -174,3 +174,45 @@ class TestHeartbeat:
 
         result = runner.invoke(app, ["heartbeat"])
         assert result.exit_code == 1
+
+
+# ── doctor ────────────────────────────────────────────────────────────────────
+
+class TestDoctor:
+    def test_unconfigured_exits_nonzero(self):
+        """doctor flags push mode and exits 1 when not configured."""
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 1, result.output
+        assert "Push mode configured" in result.output
+
+    def test_configured_passes(self, monkeypatch):
+        """With push configured and the heartbeat stubbed (autouse), doctor passes."""
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "https://x.supabase.co")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_ANON_KEY", "anon-key")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_SYSTEM_ID", "55555555-5555-5555-5555-555555555555")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_TOKEN", "tok")
+        import crashpilot.config as cfg_mod
+        cfg_mod._settings = None
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0, result.output
+        assert "All checks passed" in result.output
+
+    def test_connection_failure_is_reported(self, monkeypatch):
+        """A failing heartbeat surfaces as a connection problem (exit 1)."""
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "https://x.supabase.co")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_ANON_KEY", "anon-key")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_SYSTEM_ID", "66666666-6666-6666-6666-666666666666")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_TOKEN", "tok")
+        import crashpilot.config as cfg_mod
+        cfg_mod._settings = None
+
+        async def _failing_push(*_, **__):
+            raise RuntimeError("HTTP 404: the agent_heartbeat function does not exist")
+
+        import crashpilot.cloud_push as cp_mod
+        monkeypatch.setattr(cp_mod, "push_heartbeat", _failing_push)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 1, result.output
+        assert "Dashboard connection" in result.output

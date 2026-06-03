@@ -449,5 +449,127 @@ def heartbeat(
         )
 
 
+@app.command()
+def doctor() -> None:
+    """[bold]Diagnose[/bold] the agent setup and its connection to the dashboard."""
+    import shutil
+    import subprocess
+
+    from . import config as cfg_mod
+    from .cloud_push import push_heartbeat
+    from .storage.store import count_reports, init_db
+
+    init_db()
+    cfg = cfg_mod.get_settings()
+
+    problems = 0
+
+    def report(label: str, status: str, detail: str = "", hint: str = "") -> None:
+        nonlocal problems
+        icon = {
+            "ok":   "[green]✓[/green]",
+            "warn": "[yellow]![/yellow]",
+            "fail": "[red]✗[/red]",
+        }[status]
+        if status == "fail":
+            problems += 1
+        line = f"  {icon} {label}"
+        if detail:
+            line += f" [dim]— {detail}[/dim]"
+        console.print(line)
+        if hint:
+            console.print(f"      [dim]{hint}[/dim]")
+
+    console.print()
+    console.print("[bold cyan]CrashPilot Doctor[/bold cyan] — checking your setup\n")
+
+    # 1. Config file
+    env_path = cfg_mod._find_env_file()
+    if env_path.exists():
+        report("Config file", "ok", str(env_path))
+    else:
+        report("Config file", "warn", "none found",
+               "Run the install command or `sudo crashpilot configure cpilot_<string>`.")
+
+    # 2. Anthropic API key (optional — heuristic analysis works without it)
+    if cfg.anthropic_api_key:
+        report("Anthropic API key", "ok", "set — AI analysis enabled")
+    else:
+        report("Anthropic API key", "warn", "not set",
+               "Heuristic analysis still runs. Set CRASHPILOT_ANTHROPIC_API_KEY for AI root-cause.")
+
+    # 3. Push mode credentials
+    missing = [
+        name for name, val in (
+            ("CRASHPILOT_SUPABASE_URL", cfg.supabase_url),
+            ("CRASHPILOT_SUPABASE_ANON_KEY", cfg.supabase_anon_key),
+            ("CRASHPILOT_SUPABASE_SYSTEM_ID", cfg.supabase_system_id),
+            ("CRASHPILOT_SUPABASE_TOKEN", cfg.supabase_token),
+        ) if not val
+    ]
+    push_configured = not missing
+    if push_configured:
+        report("Push mode configured", "ok", f"system {cfg.supabase_system_id}")
+    else:
+        report("Push mode configured", "fail", "missing: " + ", ".join(missing),
+               "Create a system in the dashboard, then run the configure command it shows.")
+
+    # 4. Live connection to the dashboard (also validates schema/RPCs + token)
+    if push_configured:
+        try:
+            asyncio.run(push_heartbeat(
+                supabase_url=cfg.supabase_url,
+                anon_key=cfg.supabase_anon_key,
+                system_id=cfg.supabase_system_id,
+                agent_token=cfg.supabase_token,
+            ))
+            report("Dashboard connection", "ok", "heartbeat delivered — system is online")
+        except Exception as e:
+            lines = str(e).split("\n")
+            report("Dashboard connection", "fail", lines[0].strip(),
+                   "\n      ".join(line.strip() for line in lines[1:]) or "")
+    else:
+        report("Dashboard connection", "warn", "skipped (push mode not configured)")
+
+    # 5. systemd units (best-effort; absent in containers)
+    if shutil.which("systemctl"):
+        def _systemctl(*args: str) -> str:
+            try:
+                return subprocess.run(
+                    ["systemctl", *args], capture_output=True, text=True,
+                ).stdout.strip()
+            except OSError:
+                return ""
+
+        timer_state = _systemctl("is-active", "crashpilot-heartbeat.timer")
+        if timer_state == "active":
+            report("Heartbeat timer", "ok", "active (pings every ~60s)")
+        else:
+            report("Heartbeat timer", "fail", timer_state or "not found",
+                   "Enable it: sudo systemctl enable --now crashpilot-heartbeat.timer")
+
+        boot_state = _systemctl("is-enabled", "crashpilot.service")
+        if boot_state == "enabled":
+            report("Boot-time analysis", "ok", "enabled (runs once per boot)")
+        else:
+            report("Boot-time analysis", "warn", boot_state or "not found",
+                   "Enable it: sudo systemctl enable crashpilot.service")
+    else:
+        report("systemd", "warn", "not available (container?)",
+               "Ensure something runs `crashpilot heartbeat` every ~60s to stay online.")
+
+    # 6. Stored reports
+    report("Local reports", "ok", f"{count_reports()} stored")
+
+    console.print()
+    if problems:
+        console.print(
+            f"[red]✗ {problems} problem(s) found.[/red] Fix the items marked "
+            "[red]✗[/red] above, then re-run [cyan]sudo crashpilot doctor[/cyan]."
+        )
+        raise typer.Exit(1)
+    console.print("[green]✓ All checks passed — CrashPilot is healthy.[/green]")
+
+
 if __name__ == "__main__":
     app()
