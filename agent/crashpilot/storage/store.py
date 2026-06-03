@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS crash_reports (
     summary     TEXT,
     telemetry   TEXT NOT NULL,   -- JSON blob
     analysis    TEXT,            -- JSON blob, NULL until analyzed
+    pushed      INTEGER NOT NULL DEFAULT 0,  -- 1 once confirmed in the cloud
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
@@ -54,6 +55,12 @@ def _conn() -> Generator[sqlite3.Connection, None, None]:
 def init_db() -> None:
     with _conn() as con:
         con.executescript(SCHEMA)
+        # Migration: add `pushed` to databases created before cloud backfill existed.
+        cols = {row[1] for row in con.execute("PRAGMA table_info(crash_reports)")}
+        if "pushed" not in cols:
+            con.execute(
+                "ALTER TABLE crash_reports ADD COLUMN pushed INTEGER NOT NULL DEFAULT 0"
+            )
 
 
 def save_report(report: dict) -> str:
@@ -125,6 +132,42 @@ def get_report(report_id: str) -> dict | None:
     if r["analysis"]:
         r["analysis"] = json.loads(r["analysis"])
     return r
+
+
+def mark_pushed(report_id: str) -> None:
+    """Mark a report as confirmed-delivered to the cloud."""
+    with _conn() as con:
+        con.execute("UPDATE crash_reports SET pushed=1 WHERE id=?", (report_id,))
+
+
+def list_unpushed(limit: int = 50) -> list[dict]:
+    """Return reports not yet confirmed in the cloud (oldest first), with
+    telemetry and analysis decoded — ready to hand to push_report()."""
+    with _conn() as con:
+        rows = con.execute(
+            """SELECT * FROM crash_reports
+               WHERE pushed = 0
+               ORDER BY COALESCE(crash_time, detected_at) ASC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    result = []
+    for row in rows:
+        r = dict(row)
+        r["telemetry"] = json.loads(r["telemetry"]) if r.get("telemetry") else {}
+        if r.get("analysis"):
+            r["analysis"] = json.loads(r["analysis"])
+        result.append(r)
+    return result
+
+
+def count_unpushed() -> int:
+    """Number of reports still waiting to reach the cloud."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT COUNT(*) FROM crash_reports WHERE pushed = 0"
+        ).fetchone()
+    return row[0] if row else 0
 
 
 def delete_report(report_id: str) -> bool:

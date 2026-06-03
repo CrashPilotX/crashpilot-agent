@@ -37,6 +37,7 @@ from .storage.store import (
     cleanup_old_reports,
     get_meta,
     init_db,
+    mark_pushed,
     save_report,
     set_meta,
     update_analysis,
@@ -278,7 +279,9 @@ async def check_and_analyze(force: bool = False) -> dict | None:
         if removed:
             log.info("Pruned %d report(s) older than %d days", removed, cfg.max_report_age_days)
 
-    # Push to Supabase cloud if configured (push mode — no public URL needed)
+    # Push to Supabase cloud if configured (push mode — no public URL needed).
+    # On failure the report stays marked unpushed and the heartbeat timer will
+    # retry it later (backfill), so a transient network blip never loses a report.
     if cfg.supabase_url and cfg.supabase_system_id and cfg.supabase_token:
         try:
             from .cloud_push import push_report as cloud_push_report
@@ -289,8 +292,12 @@ async def check_and_analyze(force: bool = False) -> dict | None:
                 agent_token=cfg.supabase_token,
                 report=report,
             )
+            mark_pushed(report_id)
         except Exception as exc:
-            log.warning("Could not push report to Supabase: %s", exc)
+            log.warning(
+                "Could not push report to Supabase (will retry on next heartbeat): %s",
+                exc,
+            )
 
     return report
 

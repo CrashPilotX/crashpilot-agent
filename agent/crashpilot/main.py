@@ -427,15 +427,40 @@ def heartbeat(
         # Exit 0 so the systemd timer treats an unconfigured agent as a no-op.
         raise typer.Exit(0)
 
-    from .cloud_push import push_heartbeat
+    from .cloud_push import push_heartbeat, push_report
+    from .storage.store import init_db, list_unpushed, mark_pushed
 
-    try:
-        asyncio.run(push_heartbeat(
+    init_db()
+
+    async def _heartbeat_and_backfill() -> int:
+        await push_heartbeat(
             supabase_url=cfg.supabase_url,
             anon_key=cfg.supabase_anon_key,
             system_id=cfg.supabase_system_id,
             agent_token=cfg.supabase_token,
-        ))
+        )
+        # Backfill: flush any reports that never reached the cloud (e.g. a crash
+        # whose boot-time push failed before the network was up).
+        flushed = 0
+        for rep in list_unpushed():
+            try:
+                await push_report(
+                    supabase_url=cfg.supabase_url,
+                    anon_key=cfg.supabase_anon_key,
+                    system_id=cfg.supabase_system_id,
+                    agent_token=cfg.supabase_token,
+                    report=rep,
+                )
+                mark_pushed(rep["id"])
+                flushed += 1
+            except Exception as exc:
+                # Stop on the first failure — retry the rest next cycle.
+                logging.getLogger(__name__).warning("Backfill push failed: %s", exc)
+                break
+        return flushed
+
+    try:
+        flushed = asyncio.run(_heartbeat_and_backfill())
     except Exception as e:
         # Always surface the reason — for manual runs and for `journalctl` when
         # the timer fires. Detailed text comes from cloud_push._explain_http_error.
@@ -447,6 +472,8 @@ def heartbeat(
             f"[green]✓ Heartbeat sent[/green] — system [dim]{cfg.supabase_system_id}[/dim] "
             "is now online in the dashboard."
         )
+        if flushed:
+            console.print(f"[green]✓ Backfilled {flushed} pending report(s) to the cloud.[/green]")
 
 
 @app.command()
@@ -457,7 +484,7 @@ def doctor() -> None:
 
     from . import config as cfg_mod
     from .cloud_push import push_heartbeat
-    from .storage.store import count_reports, init_db
+    from .storage.store import count_reports, count_unpushed, init_db
 
     init_db()
     cfg = cfg_mod.get_settings()
@@ -558,8 +585,14 @@ def doctor() -> None:
         report("systemd", "warn", "not available (container?)",
                "Ensure something runs `crashpilot heartbeat` every ~60s to stay online.")
 
-    # 6. Stored reports
+    # 6. Stored reports + pending uploads (backfill queue)
     report("Local reports", "ok", f"{count_reports()} stored")
+    pending = count_unpushed()
+    if pending:
+        report("Pending uploads", "warn", f"{pending} report(s) not yet in the cloud",
+               "They retry on each heartbeat. Run `sudo crashpilot heartbeat` to flush now.")
+    else:
+        report("Pending uploads", "ok", "none — all reports delivered")
 
     console.print()
     if problems:

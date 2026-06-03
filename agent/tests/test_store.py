@@ -28,11 +28,14 @@ def tmp_db(tmp_path, monkeypatch):
 from crashpilot.storage.store import (
     cleanup_old_reports,
     count_reports,
+    count_unpushed,
     delete_report,
     get_meta,
     get_report,
     init_db,
     list_reports,
+    list_unpushed,
+    mark_pushed,
     save_report,
     set_meta,
     update_analysis,
@@ -75,6 +78,42 @@ class TestInitDb:
         assert "crash_reports" in tables
         assert "meta" in tables
         con.close()
+
+
+class TestBackfill:
+    def test_new_report_is_unpushed(self):
+        save_report(_make_report("crash_bf1"))
+        assert count_unpushed() == 1
+        ids = [r["id"] for r in list_unpushed()]
+        assert "crash_bf1" in ids
+
+    def test_mark_pushed_removes_from_queue(self):
+        save_report(_make_report("crash_bf2"))
+        mark_pushed("crash_bf2")
+        assert count_unpushed() == 0
+        assert list_unpushed() == []
+
+    def test_list_unpushed_decodes_json(self):
+        save_report(_make_report("crash_bf3"))
+        rep = list_unpushed()[0]
+        # telemetry/analysis come back as dicts, ready for push_report()
+        assert isinstance(rep["telemetry"], dict)
+        assert isinstance(rep["analysis"], dict)
+
+    def test_resave_resets_pushed_flag(self):
+        """Re-analyzing a boot (INSERT OR REPLACE) should re-queue it for push."""
+        save_report(_make_report("crash_bf4"))
+        mark_pushed("crash_bf4")
+        assert count_unpushed() == 0
+        save_report(_make_report("crash_bf4"))  # re-save (e.g. analyze --force)
+        assert count_unpushed() == 1
+
+    def test_update_analysis_preserves_pushed(self):
+        """Adding AI analysis to an already-pushed report must not re-queue it."""
+        save_report(_make_report("crash_bf5"))
+        mark_pushed("crash_bf5")
+        update_analysis("crash_bf5", {"ai_analyzed": True, "severity": "critical"})
+        assert count_unpushed() == 0
 
 
 class TestSaveAndGet:

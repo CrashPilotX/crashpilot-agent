@@ -175,6 +175,44 @@ class TestHeartbeat:
         result = runner.invoke(app, ["heartbeat"])
         assert result.exit_code == 1
 
+    def test_backfills_unpushed_reports(self, monkeypatch):
+        """A successful heartbeat flushes any locally-stored unpushed reports."""
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "https://x.supabase.co")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_ANON_KEY", "anon-key")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_SYSTEM_ID", "77777777-7777-7777-7777-777777777777")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_TOKEN", "tok")
+        import crashpilot.config as cfg_mod
+        cfg_mod._settings = None
+
+        from crashpilot.storage.store import count_unpushed, init_db, save_report
+        init_db()
+        save_report({
+            "id": "crash_backfill1",
+            "boot_id": "boot_x",
+            "detected_at": "2026-01-01T00:00:00+00:00",
+            "crash_time": None,
+            "crash_type": "oom_kill",
+            "severity": "high",
+            "summary": "pending report",
+            "telemetry": {"platform": {"type": "bare_metal"}},
+            "analysis": {"ai_analyzed": False},
+        })
+        assert count_unpushed() == 1
+
+        pushed_ids = []
+
+        async def _ok_report(*, report, **_):
+            pushed_ids.append(report["id"])
+            return report["id"]
+
+        # push_heartbeat is stubbed to a no-op by the autouse fixture.
+        monkeypatch.setattr("crashpilot.cloud_push.push_report", _ok_report)
+
+        result = runner.invoke(app, ["heartbeat"])
+        assert result.exit_code == 0, result.output
+        assert pushed_ids == ["crash_backfill1"]
+        assert count_unpushed() == 0
+
 
 # ── doctor ────────────────────────────────────────────────────────────────────
 
