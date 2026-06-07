@@ -1,0 +1,49 @@
+# nfpm config — builds .deb and .rpm from the staged binary + units.
+# https://nfpm.goreleaser.com/configuration/
+#
+# VERSION and ARCH are taken from the environment (set by build.sh / CI).
+name: crashpilot
+arch: ${ARCH:-amd64}
+platform: linux
+version: ${VERSION}
+version_schema: none
+section: admin
+priority: optional
+maintainer: kdigitalsystems <noreply@kdigitalsystems.dev>
+description: |
+  AI-powered Linux crash forensics and root-cause analysis.
+  Detects abnormal reboots/crashes, explains why, and pushes reports to the
+  CrashPilot dashboard. Heuristic analysis works with no API key.
+homepage: https://github.com/kdigitalsystems/CrashPilot
+license: MIT
+
+# The PyInstaller binary is self-contained, so there are no runtime deps.
+# Optional tools (smartmontools, lm-sensors) only enhance telemetry.
+recommends:
+  - smartmontools
+  - lm-sensors
+
+contents:
+  - src: dist/stage/usr/bin/crashpilot
+    dst: /usr/bin/crashpilot
+    file_info:
+      mode: 0755
+
+  - src: dist/stage/lib/systemd/system/crashpilot.service
+    dst: /lib/systemd/system/crashpilot.service
+
+  - src: dist/stage/lib/systemd/system/crashpilot-heartbeat.service
+    dst: /lib/systemd/system/crashpilot-heartbeat.service
+
+  - src: dist/stage/lib/systemd/system/crashpilot-heartbeat.timer
+    dst: /lib/systemd/system/crashpilot-heartbeat.timer
+
+  - src: dist/stage/etc/crashpilot/.env
+    dst: /etc/crashpilot/.env
+    type: config|noreplace
+    file_info:
+      mode: 0640
+
+scripts:
+  postinstall: packaging/postinstall.sh
+  preremove: packaging/preremove.sh
