@@ -209,23 +209,38 @@ def _extract_json(text: str) -> str:
 
 
 def _no_api_key_result(detection: dict) -> dict:
+    """Build a genuinely useful result from heuristics alone (no API key needed).
+
+    Pulls a plain-English root cause, remediation steps, and monitoring tips from
+    the built-in knowledge base so the keyless path is actionable, not just a label.
+    """
+    from .heuristic_advice import advice_for
+
+    crash_type = detection.get("crash_type", "unknown")
+    confidence = detection.get("confidence", 0.3)
+    advice = advice_for(crash_type)
+
     return {
-        "root_cause": "API key not configured — heuristic analysis only",
-        "crash_type": detection.get("crash_type", "unknown"),
+        "root_cause": advice["root_cause"],
+        "crash_type": crash_type,
         "severity": detection.get("severity", "unknown"),
-        "confidence": detection.get("confidence", 0.3),
+        "confidence": confidence,
         "summary": (
-            f"CrashPilot detected this as a {detection.get('crash_type', 'unknown')} event "
-            f"with {detection.get('confidence', 0):.0%} confidence based on log pattern matching. "
-            "Set CRASHPILOT_ANTHROPIC_API_KEY to enable full AI root-cause analysis."
+            f"{advice['root_cause']} "
+            f"(heuristic detection, {confidence:.0%} confidence). "
+            "Set CRASHPILOT_ANTHROPIC_API_KEY for an evidence-weighted AI deep-dive."
         ),
         "evidence": [{"source": e, "excerpt": e, "interpretation": "", "weight": 0.5}
                      for e in detection.get("evidence", [])[:5]],
         "timeline": [],
-        "contributing_factors": [],
-        "remediation": [],
-        "monitoring_suggestions": [],
-        "confidence_explanation": "AI analysis unavailable — configure Anthropic API key",
+        "contributing_factors": advice.get("contributing_factors", []),
+        "remediation": advice.get("remediation", []),
+        "monitoring_suggestions": advice.get("monitoring_suggestions", []),
+        "confidence_explanation": (
+            "This is heuristic pattern-matching on the logs. An Anthropic API key "
+            "enables AI analysis that weighs the evidence and tailors remediation "
+            "to your specific telemetry."
+        ),
         "ai_analyzed": False,
     }
 
