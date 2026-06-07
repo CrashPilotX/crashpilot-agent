@@ -58,9 +58,14 @@ def init_db() -> None:
         # Migration: add `pushed` to databases created before cloud backfill existed.
         cols = {row[1] for row in con.execute("PRAGMA table_info(crash_reports)")}
         if "pushed" not in cols:
-            con.execute(
-                "ALTER TABLE crash_reports ADD COLUMN pushed INTEGER NOT NULL DEFAULT 0"
-            )
+            try:
+                con.execute(
+                    "ALTER TABLE crash_reports ADD COLUMN pushed INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                # Another process (e.g. the heartbeat loop starting alongside the
+                # boot analysis) added the column first — that's fine.
+                pass
 
 
 def save_report(report: dict) -> str:

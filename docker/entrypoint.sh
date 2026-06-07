@@ -31,8 +31,12 @@ case "${1:-serve}" in
     ;;
   serve)
     echo "[CrashPilot] Starting API server on ${CRASHPILOT_API_HOST:-0.0.0.0}:${CRASHPILOT_API_PORT:-7878}..."
-    # Run analysis first (pushes a report if push mode is configured), then serve.
-    crashpilot analyze --force 2>&1 || true
+    # Run the startup analysis in the background and serve immediately, so
+    # /health is available right away — k8s liveness/readiness probes can't wait
+    # for AI analysis (up to CRASHPILOT_ANALYSIS_TIMEOUT) without killing the pod.
+    # The report still pushes when the analysis finishes; the heartbeat loop also
+    # backfills it if that push fails.
+    ( crashpilot analyze --force 2>&1 || true ) &
     start_heartbeat_loop
     exec crashpilot serve \
       --host "${CRASHPILOT_API_HOST:-0.0.0.0}" \
@@ -40,7 +44,7 @@ case "${1:-serve}" in
     ;;
   daemon)
     echo "[CrashPilot] Running in daemon mode (analyze + serve)..."
-    crashpilot analyze 2>&1 || true
+    ( crashpilot analyze 2>&1 || true ) &
     start_heartbeat_loop
     exec crashpilot serve \
       --host "${CRASHPILOT_API_HOST:-0.0.0.0}" \
