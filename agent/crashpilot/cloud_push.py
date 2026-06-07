@@ -115,6 +115,16 @@ async def push_report(
     # Exclude raw telemetry — too large for Supabase; keep structured fields only
     cloud_report = {k: v for k, v in report.items() if k != "telemetry"}
 
+    # The agent_push_report RPC reads these from the TOP level, but they live
+    # inside `analysis`. Lift them so the cloud row (and the dashboard's "AI
+    # analyzed" badge/stat + severity) reflects the analysis, not just heuristics.
+    analysis = report.get("analysis") or {}
+    cloud_report["ai_analyzed"] = bool(analysis.get("ai_analyzed", False))
+    if analysis.get("severity"):
+        cloud_report["severity"] = analysis["severity"]
+    if analysis.get("crash_type"):
+        cloud_report["crash_type"] = analysis["crash_type"]
+
     url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_push_report"
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
         resp = await client.post(

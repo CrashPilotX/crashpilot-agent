@@ -46,56 +46,15 @@ spec:
       # Host network for better network visibility
       hostNetwork: false
 
-      initContainers:
-        # Run crash analysis once at startup, then the main container serves
-        - name: analyze
-          image: ghcr.io/kdigitalsystems/crashpilot:latest
-          command: ["crashpilot", "analyze", "--force"]
-          envFrom:
-            - configMapRef:
-                name: crashpilot-config
-            - secretRef:
-                name: crashpilot-secrets
-          env:
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-          volumeMounts:
-            - name: data
-              mountPath: /data
-            - name: host-var-log
-              mountPath: /var/log
-              readOnly: true
-            - name: host-journal
-              mountPath: /run/log/journal
-              readOnly: true
-            - name: host-sys
-              mountPath: /sys
-              readOnly: true
-            - name: host-proc
-              mountPath: /proc
-              readOnly: true
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
-          securityContext:
-            privileged: true
-            runAsUser: 0
-
       containers:
         - name: api
           image: ghcr.io/kdigitalsystems/crashpilot:latest
-          command: ["crashpilot", "serve"]
-          args: ["--host", "0.0.0.0", "--port", "7878"]
+          # Use the image entrypoint (serve mode): it runs one crash analysis on
+          # start (pushing the report in push mode), starts a 60s heartbeat loop
+          # so the node stays "online" in the dashboard, then serves /health for
+          # the probes. Host/port come from the ConfigMap. Overriding `command`
+          # here would bypass entrypoint.sh and disable heartbeats.
+          args: ["serve"]
           ports:
             - name: api
               containerPort: 7878

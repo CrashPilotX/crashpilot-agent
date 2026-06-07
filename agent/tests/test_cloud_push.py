@@ -143,6 +143,28 @@ class TestPushReport:
             assert report_body["severity"] == "high"
             assert "analysis" in report_body
 
+    async def test_ai_analyzed_lifted_to_top_level(self):
+        """analysis.ai_analyzed must be lifted to the top level for the RPC,
+        otherwise the dashboard's 'AI analyzed' badge/stat is always false."""
+        with respx.mock:
+            route = respx.post(RPT_URL).mock(
+                return_value=httpx.Response(200, json="crash_abc123def456")
+            )
+            await push_report(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN, SAMPLE_REPORT)
+            report_body = json.loads(route.calls[0].request.content)["p_report"]
+            assert report_body["ai_analyzed"] is True
+
+    async def test_ai_analyzed_false_when_heuristic_only(self):
+        """A heuristic-only report (analysis.ai_analyzed false) stays false."""
+        heuristic = {**SAMPLE_REPORT, "analysis": {"ai_analyzed": False, "confidence": 0.5}}
+        with respx.mock:
+            route = respx.post(RPT_URL).mock(
+                return_value=httpx.Response(200, json="crash_abc123def456")
+            )
+            await push_report(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN, heuristic)
+            report_body = json.loads(route.calls[0].request.content)["p_report"]
+            assert report_body["ai_analyzed"] is False
+
     async def test_correct_rpc_params(self):
         """Payload must include p_system_id, p_agent_token, p_report."""
         with respx.mock:
