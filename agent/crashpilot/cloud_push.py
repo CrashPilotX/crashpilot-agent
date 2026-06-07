@@ -100,6 +100,31 @@ async def push_heartbeat(
     log.debug("Heartbeat sent for system %s", system_id)
 
 
+# Caps for what we send to the cloud — enough to be useful, small enough for JSONB.
+_DMESG_TAIL_CHARS = 8000
+_JOURNAL_SNIPPET_CHARS = 4000
+_MAX_CRITICAL_EVENTS = 80
+
+
+def _build_telemetry_summary(telemetry: dict[str, Any]) -> dict[str, Any]:
+    """Trim the raw telemetry down to what the dashboard shows (kernel log etc.)."""
+    dmesg = telemetry.get("dmesg") or {}
+    journal = telemetry.get("journal") or {}
+    return {
+        "dmesg": {
+            "critical_events": (dmesg.get("critical_events") or [])[:_MAX_CRITICAL_EVENTS],
+            "critical_count": dmesg.get("critical_count", 0),
+            # Keep the tail (most recent lines) — that's where the crash shows up.
+            "tail": (dmesg.get("full_tail") or "")[-_DMESG_TAIL_CHARS:],
+            "mce_events": (dmesg.get("mce_events") or "")[:_JOURNAL_SNIPPET_CHARS],
+        },
+        "journal": {
+            "oom_events": (journal.get("oom_events") or "")[:_JOURNAL_SNIPPET_CHARS],
+            "previous_boot_errors": (journal.get("previous_boot_errors") or "")[-_DMESG_TAIL_CHARS:],
+        },
+    }
+
+
 async def push_report(
     supabase_url: str,
     anon_key: str,
@@ -112,8 +137,13 @@ async def push_report(
     Strips the raw telemetry blob (too large) before sending.
     Returns the report id on success, None on failure.
     """
-    # Exclude raw telemetry — too large for Supabase; keep structured fields only
+    # The raw telemetry blob is too large for Supabase, but the dashboard still
+    # needs the kernel log to show "why". Build a trimmed summary (dmesg + key
+    # journal snippets) before dropping the full telemetry.
+    telemetry_summary = _build_telemetry_summary(report.get("telemetry") or {})
+
     cloud_report = {k: v for k, v in report.items() if k != "telemetry"}
+    cloud_report["telemetry_summary"] = telemetry_summary
 
     # The agent_push_report RPC reads these from the TOP level, but they live
     # inside `analysis`. Lift them so the cloud row (and the dashboard's "AI

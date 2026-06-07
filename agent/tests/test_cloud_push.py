@@ -165,6 +165,43 @@ class TestPushReport:
             report_body = json.loads(route.calls[0].request.content)["p_report"]
             assert report_body["ai_analyzed"] is False
 
+    async def test_dmesg_summary_included(self):
+        """A trimmed dmesg/kernel log must reach the cloud for the dashboard to show."""
+        report = {
+            **SAMPLE_REPORT,
+            "telemetry": {
+                "dmesg": {
+                    "critical_events": ["[12.34] Out of memory: Killed process 999"],
+                    "critical_count": 1,
+                    "full_tail": "line1\nline2\nkernel panic here\n",
+                },
+                "journal": {"oom_events": "oom killer invoked"},
+            },
+        }
+        with respx.mock:
+            route = respx.post(RPT_URL).mock(
+                return_value=httpx.Response(200, json="crash_abc123def456")
+            )
+            await push_report(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN, report)
+            body = json.loads(route.calls[0].request.content)["p_report"]
+            assert "telemetry" not in body                       # raw blob still stripped
+            ts = body["telemetry_summary"]
+            assert ts["dmesg"]["critical_count"] == 1
+            assert "kernel panic" in ts["dmesg"]["tail"]
+            assert "oom killer" in ts["journal"]["oom_events"]
+
+    async def test_telemetry_summary_present_when_no_telemetry(self):
+        """Reports with no telemetry still get an (empty) summary, not a crash."""
+        report = {k: v for k, v in SAMPLE_REPORT.items() if k != "telemetry"}
+        with respx.mock:
+            route = respx.post(RPT_URL).mock(
+                return_value=httpx.Response(200, json="crash_abc123def456")
+            )
+            await push_report(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN, report)
+            body = json.loads(route.calls[0].request.content)["p_report"]
+            assert "telemetry_summary" in body
+            assert body["telemetry_summary"]["dmesg"]["tail"] == ""
+
     async def test_correct_rpc_params(self):
         """Payload must include p_system_id, p_agent_token, p_report."""
         with respx.mock:
