@@ -17,7 +17,7 @@ import shutil
 import socket
 import subprocess
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -166,7 +166,7 @@ def _collect_live_dmesg() -> dict[str, Any]:
     lines = [line for line in output.splitlines() if line.strip()]
     critical = [line for line in lines if _LIVE_DMESG_PATTERN.search(line)]
     dmesg = {
-        "collected_at": datetime.now(UTC).isoformat(),
+        "collected_at": datetime.now(timezone.utc).isoformat(),
         "tail": "\n".join(lines)[-_LIVE_DMESG_TAIL_CHARS:],
         "critical_events": critical[:_LIVE_DMESG_MAX_CRITICAL],
         "critical_count": len(critical),
