@@ -88,7 +88,6 @@ banner
 # ── Platform detection ────────────────────────────────────────────────────────
 section "Detecting platform"
 
-OS=""
 PKG_MGR=""
 DISTRO=""
 DISTRO_VER=""
@@ -427,13 +426,11 @@ if [[ $EUID -eq 0 ]]; then
   # Make the venv readable by all users (it lives in /opt/crashpilot)
   chmod -R a+rX "$DATA_DIR"
   ok "Installed wrapper: /usr/local/bin/crashpilot"
-  WRAPPER_INSTALLED=1
 else
   LOCAL_BIN="$HOME/.local/bin"
   mkdir -p "$LOCAL_BIN"
   create_wrapper "$LOCAL_BIN/crashpilot"
   ok "Installed wrapper: $LOCAL_BIN/crashpilot"
-  WRAPPER_INSTALLED=1
   if [[ ":$PATH:" != *":$LOCAL_BIN:"* ]]; then
     warn "Add to PATH: export PATH=\"\$HOME/.local/bin:\$PATH\""
   fi
