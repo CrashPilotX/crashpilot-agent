@@ -9,11 +9,16 @@ RPCs in Postgres (so the anon key is safe to use here).
 from __future__ import annotations
 
 import importlib.metadata
+import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
+import time
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -21,6 +26,42 @@ import httpx
 log = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(10.0)
+_LIVE_DMESG_TTL_SECONDS = 300
+_LIVE_DMESG_TAIL_CHARS = 8000
+_LIVE_DMESG_MAX_CRITICAL = 80
+_LIVE_DMESG_PATTERN = re.compile(
+    "|".join([
+        r"Kernel panic",
+        r"BUG:",
+        r"OOPS:",
+        r"general protection fault",
+        r"Hardware Error",
+        r"MCE:",
+        r"NMI:",
+        r"watchdog: BUG",
+        r"hung_task",
+        r"soft lockup",
+        r"hard LOCKUP",
+        r"RCU stall",
+        r"unable to handle kernel",
+        r"page fault",
+        r"I/O error",
+        r"EXT4-fs error",
+        r"BTRFS.*error",
+        r"xfs.*error",
+        r"ata\d+.*error",
+        r"SCSI.*error",
+        r"nvme.*error",
+        r"GPU fault",
+        r"NVRM:",
+        r"amdgpu.*ERROR",
+        r"PCIe.*error",
+        r"AER:",
+        r"thermal throttling",
+        r"temperature.*critical",
+    ]),
+    re.IGNORECASE,
+)
 
 
 def _headers(anon_key: str) -> dict[str, str]:
@@ -56,6 +97,83 @@ def _read_meminfo() -> dict[str, int]:
     except OSError:
         return {}
     return parsed
+
+
+def _live_dmesg_cache_path() -> Path | None:
+    try:
+        from .config import get_settings
+
+        data_dir = get_settings().data_dir
+        if data_dir is None:
+            return None
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / "live_dmesg.json"
+    except Exception:
+        return None
+
+
+def _load_live_dmesg_cache(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8"))
+        saved_at = float(cache.get("saved_at", 0))
+        if time.time() - saved_at <= _LIVE_DMESG_TTL_SECONDS:
+            return cache.get("dmesg")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _save_live_dmesg_cache(path: Path | None, dmesg: dict[str, Any]) -> None:
+    if path is None:
+        return
+    try:
+        path.write_text(
+            json.dumps({"saved_at": time.time(), "dmesg": dmesg}),
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
+def _collect_live_dmesg() -> dict[str, Any]:
+    """Collect a small, throttled dmesg snapshot for the dashboard."""
+    cache_path = _live_dmesg_cache_path()
+    cached = _load_live_dmesg_cache(cache_path)
+    if cached is not None:
+        return cached
+
+    output = ""
+    for args in (
+        ["dmesg", "-T", "--level=emerg,alert,crit,err,warn"],
+        ["dmesg", "--level=emerg,alert,crit,err,warn"],
+    ):
+        try:
+            result = subprocess.run(
+                args,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0 and result.stdout.strip():
+            output = result.stdout
+            break
+
+    lines = [line for line in output.splitlines() if line.strip()]
+    critical = [line for line in lines if _LIVE_DMESG_PATTERN.search(line)]
+    dmesg = {
+        "collected_at": datetime.now(UTC).isoformat(),
+        "tail": "\n".join(lines)[-_LIVE_DMESG_TAIL_CHARS:],
+        "critical_events": critical[:_LIVE_DMESG_MAX_CRITICAL],
+        "critical_count": len(critical),
+        "refresh_interval_seconds": _LIVE_DMESG_TTL_SECONDS,
+    }
+    _save_live_dmesg_cache(cache_path, dmesg)
+    return dmesg
 
 
 def _build_live_metrics() -> dict[str, Any]:
@@ -138,6 +256,8 @@ def _build_live_metrics() -> dict[str, Any]:
             metrics["gpu"] = {"nvidia": {"available": True, "gpus": []}}
     else:
         metrics["gpu"] = {"nvidia": {"available": False, "gpus": []}}
+
+    metrics["dmesg"] = _collect_live_dmesg()
 
     return metrics
 

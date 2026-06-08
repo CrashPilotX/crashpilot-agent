@@ -12,6 +12,7 @@ import httpx
 import pytest
 import respx
 
+from crashpilot import cloud_push
 from crashpilot.cloud_push import push_heartbeat, push_report
 
 SUPABASE_URL = "https://test.supabase.co"
@@ -140,6 +141,30 @@ class TestPushHeartbeat:
             respx.post(HB_URL).mock(side_effect=httpx.ConnectError("connection refused"))
             with pytest.raises(httpx.ConnectError):
                 await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
+
+    def test_live_dmesg_cache_reused_for_five_minutes(self, tmp_path, monkeypatch):
+        """Live dmesg snapshots are cached so heartbeats do not collect every minute."""
+        cache_path = tmp_path / "live_dmesg.json"
+        calls = {"count": 0}
+
+        class Result:
+            returncode = 0
+            stdout = "Kernel panic: test\nordinary warning\n"
+
+        def fake_subprocess_run(*args, **kwargs):
+            calls["count"] += 1
+            return Result()
+
+        monkeypatch.setattr(cloud_push, "_live_dmesg_cache_path", lambda: cache_path)
+        monkeypatch.setattr(cloud_push.subprocess, "run", fake_subprocess_run)
+
+        first = cloud_push._collect_live_dmesg()
+        second = cloud_push._collect_live_dmesg()
+
+        assert calls["count"] == 1
+        assert first == second
+        assert first["refresh_interval_seconds"] == 300
+        assert first["critical_count"] == 1
 
 
 # ── push_report ───────────────────────────────────────────────────────────────
