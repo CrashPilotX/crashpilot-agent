@@ -408,7 +408,6 @@ fi
 ok "CrashPilot installed in venv: $VENV_DIR"
 
 # Create a wrapper script in a system PATH location
-WRAPPER_INSTALLED=0
 create_wrapper() {
   local target="$1"
   mkdir -p "$(dirname "$target")"
