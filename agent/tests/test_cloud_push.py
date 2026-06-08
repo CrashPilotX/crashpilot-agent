@@ -7,6 +7,7 @@ asyncio_mode = "auto" is set in pyproject.toml so no @pytest.mark.asyncio needed
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -165,6 +166,48 @@ class TestPushHeartbeat:
         assert first == second
         assert first["refresh_interval_seconds"] == 300
         assert first["critical_count"] == 1
+
+    def test_agent_health_payload_reports_timer_tools_and_config(self, monkeypatch):
+        """Heartbeat metrics include agent health diagnostics for the dashboard."""
+        from crashpilot import config
+
+        monkeypatch.setattr(cloud_push, "_agent_version", lambda: "0.1.0-test")
+        monkeypatch.setattr(cloud_push, "_hostname", lambda: "ci-host")
+        monkeypatch.setattr(
+            cloud_push,
+            "_systemctl_state",
+            lambda unit, verb: "active" if verb == "is-active" else "enabled",
+        )
+        monkeypatch.setattr(
+            cloud_push.shutil,
+            "which",
+            lambda name: f"/usr/bin/{name}" if name in {"systemctl", "dmesg"} else None,
+        )
+        monkeypatch.setattr(
+            config,
+            "get_settings",
+            lambda: SimpleNamespace(
+                supabase_url="https://example.supabase.co",
+                supabase_system_id="system-id",
+                supabase_token="token",
+                data_dir="/opt/crashpilot",
+            ),
+        )
+
+        health = cloud_push._build_agent_health({
+            "tail": "kernel warning",
+            "critical_count": 2,
+            "refresh_interval_seconds": 300,
+        })
+
+        assert health["version"] == "0.1.0-test"
+        assert health["hostname"] == "ci-host"
+        assert health["timer"] == {"active": "active", "enabled": "enabled"}
+        assert health["tools"]["systemctl"] is True
+        assert health["tools"]["dmesg"] is True
+        assert health["tools"]["nvidia_smi"] is False
+        assert health["push_config"]["configured"] is True
+        assert health["dmesg"]["critical_count"] == 2
 
 
 # ── push_report ───────────────────────────────────────────────────────────────

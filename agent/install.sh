@@ -161,15 +161,7 @@ section "Checking Python"
 _sudo() { [[ $EUID -eq 0 ]] && "$@" || sudo "$@"; }
 
 install_python() {
-  case "$PKG_MGR" in
-    apt)     _sudo apt-get install -y python3 python3-pip python3-venv ;;
-    dnf|yum) _sudo "$PKG_MGR" install -y python3 python3-pip ;;
-    pacman)  _sudo pacman -Sy --noconfirm python python-pip ;;
-    zypper)  _sudo zypper install -y python3 python3-pip ;;
-    apk)     _sudo apk add --no-cache python3 py3-pip ;;
-    xbps)    _sudo xbps-install -Sy python3 python3-pip ;;
-    *)       err "Unknown package manager — install Python 3.10+ manually"; exit 1 ;;
-  esac
+  _sudo apt-get install -y python3 python3-pip python3-venv
 }
 
 if ! command -v python3 &>/dev/null; then
@@ -195,9 +187,7 @@ section "Checking optional tools"
 _mce_package() {
   local kernel_major
   kernel_major=$(uname -r | cut -d. -f1)
-  if [[ "$PKG_MGR" == "apt" && "${kernel_major:-0}" -ge 5 ]]; then
-    echo "rasdaemon"
-  elif [[ "$PKG_MGR" =~ ^(dnf|yum)$ ]]; then
+  if [[ "${kernel_major:-0}" -ge 5 ]]; then
     echo "rasdaemon"
   else
     echo "mcelog"
@@ -207,37 +197,16 @@ _mce_package() {
 # Try to install a single package; never exits — returns 0/1.
 _try_install_pkg() {
   local pkg="$1"
-  case "$PKG_MGR" in
-    apt)     _sudo apt-get install -y "$pkg" &>/dev/null && return 0 ;;
-    dnf|yum) _sudo "$PKG_MGR" install -y "$pkg" &>/dev/null && return 0 ;;
-    pacman)  _sudo pacman -Sy --noconfirm "$pkg" &>/dev/null && return 0 ;;
-    zypper)  _sudo zypper install -y "$pkg" &>/dev/null && return 0 ;;
-    apk)     _sudo apk add --no-cache "$pkg" &>/dev/null && return 0 ;;
-    xbps)    _sudo xbps-install -Sy "$pkg" &>/dev/null && return 0 ;;
-  esac
+  _sudo apt-get install -y "$pkg" &>/dev/null && return 0
   return 1
 }
 
 install_optional_tools() {
-  # tool → (apt-pkg  dnf-pkg  pacman-pkg  apk-pkg)
-  # "?"  = not available / skip for this distro
+  # Ubuntu apt package names for optional tools.
   declare -A PKG_APT=(
     [smartctl]=smartmontools
     [sensors]=lm-sensors
     [mcelog]="$(_mce_package)"
-  )
-  declare -A PKG_DNF=(
-    [smartctl]=smartmontools
-    [sensors]=lm_sensors
-    [mcelog]=rasdaemon
-  )
-  declare -A PKG_PACMAN=(
-    [smartctl]=smartmontools
-    [sensors]=lm_sensors
-  )
-  declare -A PKG_APK=(
-    [smartctl]=smartmontools
-    [sensors]=lm-sensors
   )
 
   local missing=()
@@ -247,12 +216,7 @@ install_optional_tools() {
     else
       warn "  $tool — not found"
       local pkg=""
-      case "$PKG_MGR" in
-        apt)        pkg="${PKG_APT[$tool]:-}" ;;
-        dnf|yum)    pkg="${PKG_DNF[$tool]:-}" ;;
-        pacman)     pkg="${PKG_PACMAN[$tool]:-}" ;;
-        apk)        pkg="${PKG_APK[$tool]:-}" ;;
-      esac
+      pkg="${PKG_APT[$tool]:-}"
       [[ -n "$pkg" ]] && missing+=("$pkg")
     fi
   done

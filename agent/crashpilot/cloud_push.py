@@ -176,6 +176,61 @@ def _collect_live_dmesg() -> dict[str, Any]:
     return dmesg
 
 
+def _systemctl_state(unit: str, verb: str) -> str | None:
+    if not shutil.which("systemctl"):
+        return None
+    try:
+        result = subprocess.run(
+            ["systemctl", verb, unit],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (result.stdout or result.stderr).strip() or None
+
+
+def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
+    """Small diagnostic payload shown in the dashboard health panel."""
+    health: dict[str, Any] = {
+        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "version": _agent_version(),
+        "hostname": _hostname(),
+        "timer": {
+            "active": _systemctl_state("crashpilot-heartbeat.timer", "is-active"),
+            "enabled": _systemctl_state("crashpilot-heartbeat.timer", "is-enabled"),
+        },
+        "tools": {
+            "systemctl": bool(shutil.which("systemctl")),
+            "dmesg": bool(shutil.which("dmesg")),
+            "nvidia_smi": bool(shutil.which("nvidia-smi")),
+        },
+        "dmesg": {
+            "readable": bool(dmesg.get("tail") or dmesg.get("critical_events")),
+            "critical_count": dmesg.get("critical_count", 0),
+            "refresh_interval_seconds": dmesg.get("refresh_interval_seconds"),
+        },
+    }
+    try:
+        from .config import get_settings
+
+        settings = get_settings()
+        health["push_config"] = {
+            "configured": bool(
+                settings.supabase_url
+                and settings.supabase_system_id
+                and settings.supabase_token
+            ),
+            "system_id": settings.supabase_system_id,
+        }
+        health["data_dir"] = str(settings.data_dir) if settings.data_dir else None
+    except Exception as exc:
+        health["config_error"] = str(exc)
+    return health
+
+
 def _build_live_metrics() -> dict[str, Any]:
     """Small heartbeat payload for near-live resource load in the dashboard."""
     metrics: dict[str, Any] = {}
@@ -258,6 +313,7 @@ def _build_live_metrics() -> dict[str, Any]:
         metrics["gpu"] = {"nvidia": {"available": False, "gpus": []}}
 
     metrics["dmesg"] = _collect_live_dmesg()
+    metrics["agent_health"] = _build_agent_health(metrics["dmesg"])
 
     return metrics
 
