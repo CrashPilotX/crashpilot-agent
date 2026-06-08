@@ -138,8 +138,8 @@ _ADVICE: dict[str, dict[str, Any]] = {
             },
             {
                 "priority": 2,
-                "action": "On a VM/cloud instance, check the host for spot/preemption or host maintenance events.",
-                "rationale": "Spot interruptions and live-migration stalls look like power loss in guest logs.",
+                "action": "If this Ubuntu machine is virtualized, check the host for maintenance or power events.",
+                "rationale": "Host-level interruptions can look like power loss in guest logs.",
             },
             {
                 "priority": 3,

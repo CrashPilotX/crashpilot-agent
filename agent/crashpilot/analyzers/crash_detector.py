@@ -61,7 +61,7 @@ _RULES: list[tuple[CrashType, Severity, list[str]]] = [
         r"oom_kill_process",
         r"Killed process \d+.*oom_kill",
         r"oom-killer invoked",
-        r"Memory cgroup out of memory",    # cgroup v2 / container OOM
+        r"Memory cgroup out of memory",
     ]),
     (CrashType.THERMAL_SHUTDOWN, Severity.HIGH, [
         r"ACPI: Thermal Zone.*critical",

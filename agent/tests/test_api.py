@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -69,7 +68,6 @@ def saved_report(tmp_db):
             "smart": {},
             "gpu": {},
             "thermal": {},
-            "docker": {},
         },
         "analysis": {
             "ai_analyzed": False,
@@ -105,7 +103,7 @@ def multi_reports(tmp_db):
             "summary": f"Test {ctype}",
             "telemetry": {
                 "system": {}, "platform": {}, "journal": {},
-                "dmesg": {}, "smart": {}, "gpu": {}, "thermal": {}, "docker": {},
+                "dmesg": {}, "smart": {}, "gpu": {}, "thermal": {},
             },
             "analysis": {
                 "ai_analyzed": False,

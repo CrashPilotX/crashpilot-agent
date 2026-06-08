@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import stat
 
 import pytest
 from typer.testing import CliRunner
@@ -60,6 +61,14 @@ class TestConfigure:
         assert "CRASHPILOT_SUPABASE_ANON_KEY=anon-key-value" in content
         assert "CRASHPILOT_SUPABASE_SYSTEM_ID=11111111-1111-1111-1111-111111111111" in content
         assert "CRASHPILOT_SUPABASE_TOKEN=agent-token-value" in content
+
+    def test_configure_keeps_env_file_private(self, tmp_path):
+        """configure writes agent credentials, so .env must not be world-readable."""
+        conn_str = _make_conn_str()
+        result = runner.invoke(app, ["configure", conn_str])
+        assert result.exit_code == 0, result.output
+        mode = stat.S_IMODE((tmp_path / ".env").stat().st_mode)
+        assert mode == 0o600
 
     def test_preserves_existing_keys(self, tmp_path):
         """configure must not destroy pre-existing config entries."""

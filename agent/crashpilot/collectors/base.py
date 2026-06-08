@@ -42,7 +42,7 @@ async def run_cmd(
 
 
 def cmd_available(name: str) -> bool:
-    """Check if a CLI tool is on PATH (works on all distros including Alpine)."""
+    """Check if a CLI tool is on PATH."""
     return shutil.which(name) is not None
 
 

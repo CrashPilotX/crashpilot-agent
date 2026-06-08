@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # CrashPilot Universal Installer
-# Supports: Ubuntu/Debian, RHEL/CentOS/Rocky/Alma, Fedora,
-#           Arch Linux, openSUSE, Alpine, Void Linux, WSL1/2
+# Supports: Ubuntu Linux and Ubuntu on WSL1/WSL2.
 set -uo pipefail   # no -e: we handle errors explicitly so one bad package can't abort
 
 # ── Locate the repo ───────────────────────────────────────────────────────────
@@ -21,8 +20,7 @@ else
       || { echo "[err ]  git clone failed"; exit 1; }
   else
     echo "[err ]  git is required for curl-pipe installs. Install it with:"
-    echo "        sudo apt-get install git   # Debian/Ubuntu"
-    echo "        sudo dnf install git       # Fedora/RHEL"
+    echo "        sudo apt-get install git"
     exit 1
   fi
   REPO_DIR="$CLONE_DIR"
@@ -96,7 +94,6 @@ DISTRO=""
 DISTRO_VER=""
 INIT_SYS=""
 IS_WSL=0
-IS_DOCKER=0
 IS_CONTAINER=0
 
 # OS release
@@ -108,12 +105,6 @@ fi
 
 # Package manager
 if   command -v apt-get  &>/dev/null; then PKG_MGR="apt"
-elif command -v dnf      &>/dev/null; then PKG_MGR="dnf"
-elif command -v yum      &>/dev/null; then PKG_MGR="yum"
-elif command -v pacman   &>/dev/null; then PKG_MGR="pacman"
-elif command -v zypper   &>/dev/null; then PKG_MGR="zypper"
-elif command -v apk      &>/dev/null; then PKG_MGR="apk"
-elif command -v xbps-install &>/dev/null; then PKG_MGR="xbps"
 else PKG_MGR="unknown"; fi
 
 # Init system
@@ -139,9 +130,9 @@ if grep -qi "microsoft\|wsl" /proc/sys/kernel/osrelease 2>/dev/null; then
   fi
 fi
 
-# Docker/container detection
+# Unsupported container environment detection
 if [[ -f /.dockerenv ]] || grep -q docker /proc/1/cgroup 2>/dev/null; then
-  IS_DOCKER=1; IS_CONTAINER=1
+  IS_CONTAINER=1
 fi
 if [[ -n "${KUBERNETES_SERVICE_HOST:-}" ]] || [[ -d /var/run/secrets/kubernetes.io ]]; then
   IS_CONTAINER=1
@@ -150,7 +141,18 @@ fi
 info "Distro: ${BOLD}${DISTRO} ${DISTRO_VER}${RESET} | Package manager: ${BOLD}${PKG_MGR}${RESET}"
 info "Init system: ${BOLD}${INIT_SYS}${RESET}"
 [[ $IS_WSL -eq 1 ]] && info "WSL version: ${BOLD}${WSL_VER}${RESET}"
-[[ $IS_CONTAINER -eq 1 ]] && warn "Running inside a container — some telemetry collectors require privileged access"
+if [[ "$DISTRO" != "ubuntu" ]]; then
+  err "Unsupported distro: ${DISTRO:-unknown}. CrashPilot currently supports Ubuntu only."
+  exit 1
+fi
+if [[ "$PKG_MGR" != "apt" ]]; then
+  err "Unsupported package manager: ${PKG_MGR}. CrashPilot currently supports Ubuntu apt installs only."
+  exit 1
+fi
+if [[ $IS_CONTAINER -eq 1 ]]; then
+  err "Containerized installs are not supported right now."
+  exit 1
+fi
 
 # ── Python check ──────────────────────────────────────────────────────────────
 section "Checking Python"
@@ -187,7 +189,7 @@ fi
 # ── Optional system tools ─────────────────────────────────────────────────────
 section "Checking optional tools"
 
-# mcelog was removed from Ubuntu 20.04+ and Debian 11+ (kernel 5.x+).
+# mcelog was removed from Ubuntu 20.04+ (kernel 5.x+).
 # rasdaemon is the modern replacement on those distros.
 _mce_package() {
   local kernel_major
@@ -238,7 +240,7 @@ install_optional_tools() {
   )
 
   local missing=()
-  for tool in smartctl sensors journalctl dmesg docker nvidia-smi kubectl; do
+  for tool in smartctl sensors journalctl dmesg nvidia-smi; do
     if command -v "$tool" &>/dev/null; then
       ok "  $tool"
     else
@@ -319,7 +321,8 @@ fi
 section "Setting up configuration"
 
 mkdir -p "$CONFIG_DIR" "$DATA_DIR"
-# Root installs: config dir world-readable so any user can run crashpilot
+# Root installs keep the directory traversable for packaged tooling, but the
+# .env file itself contains secrets once push mode is configured.
 [[ $EUID -eq 0 ]] && chmod 755 "$CONFIG_DIR" || chmod 700 "$CONFIG_DIR"
 
 if [[ ! -f "$CONFIG_DIR/.env" ]]; then
@@ -344,9 +347,9 @@ CRASHPILOT_ANALYSIS_TIMEOUT=120
 # Data storage
 # CRASHPILOT_DATA_DIR=/var/lib/crashpilot  # uncomment for system-wide install
 ENVEOF
-  # System-wide installs: 644 so all users can read config (data_dir, port, etc.)
+  # Private because push-mode credentials are stored here after configure.
   # User installs: 600 (private — only the owning user needs it)
-  [[ $EUID -eq 0 ]] && chmod 644 "$CONFIG_DIR/.env" || chmod 600 "$CONFIG_DIR/.env"
+  chmod 600 "$CONFIG_DIR/.env"
   ok "Created config: $CONFIG_DIR/.env"
   echo -e "\n  ${YELLOW}ACTION REQUIRED:${RESET} Add your Anthropic API key:"
   echo -e "  ${CYAN}  nano $CONFIG_DIR/.env${RESET}"
@@ -355,9 +358,9 @@ else
 fi
 
 # Ensure correct permissions regardless of whether config was just created or existed.
-# System-wide: 644 so non-root users can read config (needed for `crashpilot token` etc.)
+# Push mode stores CRASHPILOT_SUPABASE_TOKEN here, so never leave it world-readable.
 # User install: 600 (private)
-[[ $EUID -eq 0 ]] && chmod 644 "$CONFIG_DIR/.env" || chmod 600 "$CONFIG_DIR/.env"
+chmod 600 "$CONFIG_DIR/.env"
 
 # ── Install Python package ────────────────────────────────────────────────────
 section "Installing CrashPilot"
@@ -472,7 +475,7 @@ install_systemd_services() {
 }
 
 install_openrc_services() {
-  # OpenRC (Alpine, Gentoo, Void)
+  # OpenRC is unreachable while support is Ubuntu-only.
   cat > /tmp/crashpilot-rc << RCEOF
 #!/sbin/openrc-run
 description="CrashPilot crash analysis"
@@ -488,7 +491,7 @@ RCEOF
 }
 
 install_runit_services() {
-  # runit (Void Linux)
+  # runit is unreachable while support is Ubuntu-only.
   local sv_dir="/etc/sv/crashpilot"
   sudo mkdir -p "$sv_dir"
   sudo tee "$sv_dir/run" > /dev/null << RUNIT
@@ -503,10 +506,6 @@ if [[ $IS_WSL -eq 1 ]]; then
   info "WSL detected — skipping system service installation"
   echo -e "  ${DIM}In WSL, run manually: crashpilot analyze${RESET}"
   echo -e "  ${DIM}Or add to ~/.bashrc / ~/.profile for auto-run on WSL start${RESET}"
-
-elif [[ $IS_CONTAINER -eq 1 ]]; then
-  info "Container detected — skipping service installation"
-  echo -e "  ${DIM}In containers, run: crashpilot analyze${RESET}"
 
 elif [[ "$INSTALL_SYSTEMD" == "no" ]]; then
   info "Systemd install skipped (INSTALL_SYSTEMD=no)"
@@ -540,21 +539,6 @@ elif [[ "$INIT_SYS" == "runit" ]]; then
 else
   warn "Unknown init system '$INIT_SYS' — skipping service installation"
   info "Run manually: crashpilot analyze"
-fi
-
-# ── Docker & Kubernetes install info ─────────────────────────────────────────
-if [[ $IS_DOCKER -eq 0 ]] && command -v docker &>/dev/null; then
-  echo ""
-  info "Docker detected — to monitor Docker containers, CrashPilot needs access to /var/run/docker.sock"
-  if ! groups | grep -q docker; then
-    warn "Add yourself to the docker group: sudo usermod -aG docker $USER"
-  fi
-fi
-
-if command -v kubectl &>/dev/null; then
-  echo ""
-  info "kubectl detected — CrashPilot can also analyze Kubernetes pod crashes"
-  info "See https://github.com/kdigitalsystems/CrashPilot for Kubernetes deploy instructions"
 fi
 
 # ── Test installation ─────────────────────────────────────────────────────────
@@ -600,7 +584,6 @@ echo -e "${GREEN}${BOLD}✓ Installation complete!${RESET}"
 echo ""
 echo -e "  Platform: ${BOLD}${DISTRO} ${DISTRO_VER}${RESET} | Init: ${BOLD}${INIT_SYS}${RESET}"
 [[ $IS_WSL -eq 1 ]] && echo -e "  Mode: ${YELLOW}WSL ${WSL_VER}${RESET}"
-[[ $IS_CONTAINER -eq 1 ]] && echo -e "  Mode: ${YELLOW}Container${RESET}"
 echo ""
 echo -e "  ${BOLD}Next steps:${RESET}"
 echo ""
@@ -630,12 +613,6 @@ fi
 echo ""
 echo -e "  ${DIM}Something not working? Run ${RESET}${CYAN}sudo crashpilot doctor${RESET}${DIM} — it diagnoses config, connection, and the timer.${RESET}"
 echo ""
-
-# Docker install tip
-if [[ $IS_DOCKER -eq 0 ]]; then
-  echo -e "  ${DIM}Docker deploy:      docker run --privileged -v /var/log:/var/log ghcr.io/kdigitalsystems/crashpilot${RESET}"
-  echo ""
-fi
 
 # Clean up the temp clone directory if we created one during curl-pipe install
 if [[ -n "${CLONE_DIR:-}" && -d "${CLONE_DIR:-}" ]]; then

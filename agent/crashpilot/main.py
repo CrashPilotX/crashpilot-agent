@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 import typer
@@ -354,6 +355,10 @@ def configure(
 
     content = existing.rstrip("\n") + "\n" + "\n".join(new_lines) + "\n"
     env_path.write_text(content)
+    try:
+        os.chmod(env_path, 0o600)
+    except PermissionError:
+        console.print(f"[yellow]![/yellow] Could not tighten permissions on {env_path}")
 
     console.print(f"[green]✓[/green] Connected — credentials saved to {env_path}")
 
@@ -361,7 +366,7 @@ def configure(
     cfg_mod._settings = None
 
     # Enable + start the heartbeat timer so the system stays online (best-effort:
-    # systemd may be absent, e.g. in containers).
+    # systemd may be absent, e.g. in WSL or minimal Ubuntu environments).
     timer_enabled = False
     if shutil.which("systemctl"):
         try:
@@ -558,7 +563,7 @@ def doctor() -> None:
     else:
         report("Dashboard connection", "warn", "skipped (push mode not configured)")
 
-    # 5. systemd units (best-effort; absent in containers)
+    # 5. systemd units (best-effort; absent in WSL or minimal Ubuntu environments)
     if shutil.which("systemctl"):
         def _systemctl(*args: str) -> str:
             try:
@@ -582,7 +587,7 @@ def doctor() -> None:
             report("Boot-time analysis", "warn", boot_state or "not found",
                    "Enable it: sudo systemctl enable crashpilot.service")
     else:
-        report("systemd", "warn", "not available (container?)",
+        report("systemd", "warn", "not available",
                "Ensure something runs `crashpilot heartbeat` every ~60s to stay online.")
 
     # 6. Stored reports + pending uploads (backfill queue)

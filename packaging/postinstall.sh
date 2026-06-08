@@ -1,6 +1,10 @@
 #!/bin/sh
-# Run after the package is installed/upgraded. POSIX sh (deb + rpm compatible).
+# Run after the package is installed/upgraded. POSIX sh (deb compatible).
 set -e
+
+if [ -f /etc/crashpilot/.env ]; then
+    chmod 600 /etc/crashpilot/.env || true
+fi
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true

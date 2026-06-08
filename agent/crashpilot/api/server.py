@@ -51,7 +51,7 @@ async def _require_token(
 ) -> str:
     """FastAPI dependency: validates the Bearer token on every protected route."""
     expected = get_agent_token()
-    if credentials is None or credentials.credentials != expected:
+    if credentials is None or not secrets.compare_digest(credentials.credentials, expected):
         raise HTTPException(
             status_code=401,
             detail="Missing or invalid token. Run `sudo crashpilot token` on the server to get it.",
@@ -88,10 +88,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+cfg = get_settings()
+allow_credentials = "*" not in cfg.api_cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=cfg.api_cors_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -163,7 +165,6 @@ async def get_crash_report(
             "thermal_warnings": tel.get("thermal", {}).get("thermal_warnings", []),
             "sysfs_temperatures": tel.get("thermal", {}).get("sysfs_temperatures", [])[:20],
         },
-        "docker": {k: v for k, v in tel.get("docker", {}).items() if k != "daemon_logs_tail"},
         "journal_summary": {
             "boots": tel.get("journal", {}).get("boots", []),
             "coredumps": tel.get("journal", {}).get("coredumps", []),

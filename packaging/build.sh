@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Build a self-contained CrashPilot binary and distro packages (.deb + .rpm).
+# Build a self-contained CrashPilot binary and Ubuntu .deb package.
 #
 # The agent pulls in native wheels (pydantic-core, psutil, uvloop), so we ship a
 # PyInstaller one-file binary that bundles Python + all deps — no python3 needed
-# on the target, works across distros. nfpm then wraps it with the systemd units
+# on the target. nfpm then wraps it with the systemd units
 # and a default config.
 #
 # Requirements (installed by the release workflow): python3, pip, pyinstaller, nfpm.
-# Output: dist/crashpilot (binary), dist/*.deb, dist/*.rpm, dist/SHA256SUMS
+# Output: dist/crashpilot (binary), dist/*.deb, dist/SHA256SUMS
 #
 # NOTE: this is the first packaging pass. PyInstaller hidden-import coverage may
 # need tuning on the first real CI run — see packaging/README.md.
@@ -69,10 +69,9 @@ ENVEOF
 
 # 5. Build packages for the current arch
 nfpm package --config "$REPO_ROOT/packaging/nfpm.yaml" --packager deb --target "$DIST"
-nfpm package --config "$REPO_ROOT/packaging/nfpm.yaml" --packager rpm --target "$DIST"
 
 # 6. Checksums for the binary + packages
-( cd "$DIST" && sha256sum crashpilot ./*.deb ./*.rpm > SHA256SUMS )
+( cd "$DIST" && sha256sum crashpilot ./*.deb > SHA256SUMS )
 
 echo "==> Done. Artifacts in $DIST:"
 ls -1 "$DIST" | grep -vE '^(build|stage|.*\.spec)$' || true

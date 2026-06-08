@@ -1,4 +1,4 @@
-# nfpm config — builds .deb and .rpm from the staged binary + units.
+# nfpm config - builds an Ubuntu .deb from the staged binary + units.
 # https://nfpm.goreleaser.com/configuration/
 #
 # VERSION and ARCH are taken from the environment (set by build.sh / CI).
@@ -42,7 +42,7 @@ contents:
     dst: /etc/crashpilot/.env
     type: config|noreplace
     file_info:
-      mode: 0640
+      mode: 0600
 
 scripts:
   postinstall: packaging/postinstall.sh

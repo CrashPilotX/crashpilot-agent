@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from crashpilot.monitor import _extract_boot_context, _make_report_id
+
+from crashpilot.monitor import _extract_boot_context, _make_report_id, check_and_analyze
 
 
 class TestMakeReportId:
@@ -55,13 +56,51 @@ class TestExtractBootContext:
         assert current == "unknown"
         assert previous is None
 
-    def test_kubernetes_fallback(self):
-        tel = {
-            "journal": {"boots": [], "current_boot_id": None, "previous_boot_id": None,
-                        "shutdown_info": ""},
-            "kubernetes": {"available": True},
-            "platform": {"container_id": "pod-abc-123"},
-        }
-        current, previous, crash_time = _extract_boot_context(tel)
-        assert current == "pod-abc-123"
-        assert previous is None
+
+
+@pytest.mark.asyncio
+async def test_keyless_analysis_includes_builtin_advice(monkeypatch, tmp_path):
+    """No API key should still produce plain-English advice in the saved report."""
+    monkeypatch.setenv("CRASHPILOT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("CRASHPILOT_DB_PATH", str(tmp_path / "crashpilot.db"))
+    monkeypatch.setenv("CRASHPILOT_ANTHROPIC_API_KEY", "")
+    import crashpilot.config as cfg_mod
+    cfg_mod._settings = None
+
+    telemetry = {
+        "journal": {
+            "boots": [
+                {"boot_id": "current", "first_entry": "t1", "last_entry": "t2"},
+                {"boot_id": "previous", "first_entry": "t0", "last_entry": "t1"},
+            ],
+            "current_boot_id": "current",
+            "previous_boot_id": "previous",
+            "shutdown_info": "",
+            "oom_events": "Out of memory: Killed process 1234 (python3)",
+            "previous_boot_errors": "",
+            "previous_boot_logs_tail": "",
+        },
+        "dmesg": {"full_tail": "", "critical_events": [], "mce_events": ""},
+        "platform": {
+            "type": "bare_metal",
+            "distro": "ubuntu",
+            "distro_version": "24.04",
+            "init": "systemd",
+            "kernel": "test",
+            "arch": "x86_64",
+            "hostname": "test-host",
+        },
+    }
+
+    async def _collect():
+        return telemetry
+
+    monkeypatch.setattr("crashpilot.monitor.collect_telemetry", _collect)
+
+    report = await check_and_analyze(force=True)
+
+    assert report is not None
+    assert report["analysis"]["ai_analyzed"] is False
+    assert "root_cause" in report["analysis"]
+    assert report["analysis"]["remediation"]
+    assert report["analysis"]["monitoring_suggestions"]

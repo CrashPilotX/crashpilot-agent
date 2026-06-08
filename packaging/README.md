@@ -1,27 +1,25 @@
 # CrashPilot packaging
 
 Builds a **self-contained agent binary** (no Python required on the target) and
-distro packages, so users can install with their package manager instead of
+Ubuntu packages, so users can install with apt instead of
 `curl | sudo bash`.
 
 ## What's here
 
 | File | Purpose |
 |---|---|
-| `build.sh` | Build the PyInstaller binary + `.deb`/`.rpm` (via nfpm) + `SHA256SUMS` into `dist/` |
-| `nfpm.yaml` | Package metadata + file layout for deb/rpm |
+| `build.sh` | Build the PyInstaller binary + `.deb` (via nfpm) + `SHA256SUMS` into `dist/` |
+| `nfpm.yaml` | Package metadata + file layout for deb |
 | `postinstall.sh` / `preremove.sh` | Enable/disable systemd units on install/remove |
-| `aur/PKGBUILD` | Arch Linux (AUR) package — pulls the binary from GitHub Releases |
 | `../.github/workflows/release.yml` | Builds amd64 + arm64 on a `v*` tag and publishes a GitHub Release |
 
 ## How a release works
 
 1. Tag a version: `git tag v0.1.1 && git push --tags`.
 2. `release.yml` builds on `ubuntu-latest` (amd64) and `ubuntu-24.04-arm` (arm64),
-   runs `build.sh`, and publishes `crashpilot-linux-{amd64,arm64}`, the `.deb`/`.rpm`,
+   runs `build.sh`, and publishes `crashpilot-linux-{amd64,arm64}`, the `.deb`,
    and `SHA256SUMS` to the GitHub Release.
-3. Users install via the package manager (see the main README) or download the
-   binary directly.
+3. Users install the Ubuntu package with apt.
 
 ## Status / known follow-ups
 
