@@ -11,10 +11,12 @@ set -uo pipefail   # no -e: we handle errors explicitly so one bad package can't
 _src="${BASH_SOURCE[0]:-}"
 if [[ -n "$_src" && "$_src" != "bash" && -f "$_src" ]]; then
   REPO_DIR="$(cd "$(dirname "$_src")/.." && pwd)"
-else
+fi
+
+if [[ -z "${REPO_DIR:-}" || ! -f "$REPO_DIR/agent/pyproject.toml" ]]; then
   # curl-pipe install: clone the repo into a temp dir
   CLONE_DIR="$(mktemp -d)/CrashPilot"
-  echo "[info]  curl-pipe install detected — cloning repository..."
+  echo "[info]  Standalone installer detected — cloning repository..."
   if command -v git &>/dev/null; then
     git clone --depth=1 https://github.com/kdigitalsystems/CrashPilot.git "$CLONE_DIR" \
       || { echo "[err ]  git clone failed"; exit 1; }
