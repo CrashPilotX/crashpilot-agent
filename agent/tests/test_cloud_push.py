@@ -50,7 +50,7 @@ class TestPushHeartbeat:
             assert route.called
 
     async def test_correct_payload(self):
-        """Heartbeat includes system_id, agent_token, hostname, version."""
+        """Heartbeat includes system_id, agent_token, hostname, version, and metrics."""
         with respx.mock:
             route = respx.post(HB_URL).mock(return_value=httpx.Response(200))
             await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
@@ -59,6 +59,40 @@ class TestPushHeartbeat:
             assert payload["p_agent_token"] == AGENT_TOKEN
             assert "p_hostname" in payload
             assert "p_version" in payload
+            assert "p_metrics" in payload
+            assert "cpu" in payload["p_metrics"]
+            assert "memory" in payload["p_metrics"]
+
+    async def test_accepts_explicit_metrics(self):
+        """Heartbeat can send caller-supplied live metrics."""
+        metrics = {"cpu": {"load_pct": 12.5}, "memory": {"used_pct": 42.0}}
+        with respx.mock:
+            route = respx.post(HB_URL).mock(return_value=httpx.Response(200))
+            await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN, metrics=metrics)
+            payload = json.loads(route.calls[0].request.content)
+            assert payload["p_metrics"] == metrics
+
+    async def test_metrics_rpc_falls_back_to_legacy_heartbeat(self):
+        """Older Supabase schemas without p_metrics still receive a legacy heartbeat."""
+        with respx.mock:
+            route = respx.post(HB_URL).mock(
+                side_effect=[
+                    httpx.Response(404, json={"message": "Could not find function with p_metrics"}),
+                    httpx.Response(200),
+                ]
+            )
+            await push_heartbeat(
+                SUPABASE_URL,
+                ANON_KEY,
+                SYSTEM_ID,
+                AGENT_TOKEN,
+                metrics={"cpu": {"load_pct": 1}},
+            )
+            assert route.call_count == 2
+            first = json.loads(route.calls[0].request.content)
+            second = json.loads(route.calls[1].request.content)
+            assert "p_metrics" in first
+            assert "p_metrics" not in second
 
     async def test_sends_auth_headers(self):
         """Request must include apikey and Authorization headers."""
