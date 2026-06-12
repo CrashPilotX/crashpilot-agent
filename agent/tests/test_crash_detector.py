@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
 from crashpilot.analyzers.crash_detector import (
     CrashType,
     Severity,
-    detect_crash_type,
     _build_corpus,
     _match_patterns,
+    detect_crash_type,
 )
 
 

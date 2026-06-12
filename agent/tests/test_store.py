@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from unittest.mock import patch
+import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
+
 
 # We need to point settings at a temp DB before importing store
 @pytest.fixture(autouse=True)
@@ -25,7 +22,7 @@ def tmp_db(tmp_path, monkeypatch):
     cfg_mod._settings = None
 
 
-from crashpilot.storage.store import (
+from crashpilot.storage.store import (  # noqa: E402
     cleanup_old_reports,
     count_reports,
     count_unpushed,
@@ -70,7 +67,6 @@ class TestInitDb:
 
     def test_tables_exist_after_init(self):
         from crashpilot.config import get_settings
-        import sqlite3
         con = sqlite3.connect(str(get_settings().db_path))
         tables = {row[0] for row in con.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"

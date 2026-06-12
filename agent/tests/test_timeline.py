@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
 from crashpilot.analyzers.timeline import (
-    build_timeline,
     _extract_timestamp,
     _infer_level,
-    _strip_timestamp_prefix,
+    build_timeline,
 )
 
 
