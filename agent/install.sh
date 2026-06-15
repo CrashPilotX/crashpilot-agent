@@ -464,10 +464,24 @@ RUNIT
   ok "runit service installed at $sv_dir"
 }
 
-if [[ $IS_WSL -eq 1 ]]; then
-  info "WSL detected — skipping system service installation"
-  echo -e "  ${DIM}In WSL, run manually: crashpilot analyze${RESET}"
-  echo -e "  ${DIM}Or add to ~/.bashrc / ~/.profile for auto-run on WSL start${RESET}"
+if [[ $IS_WSL -eq 1 && "$INIT_SYS" == "systemd" ]]; then
+  if [[ $EUID -eq 0 ]]; then
+    info "WSL with systemd detected — installing heartbeat timer"
+    install_systemd_services
+  else
+    read -rp "Install systemd services for WSL (requires sudo)? [Y/n] " ans
+    if [[ ! "$ans" =~ ^[Nn]$ ]]; then
+      install_systemd_services
+    else
+      info "Skipping systemd services"
+      echo -e "  ${DIM}Run manually after connecting: crashpilot heartbeat${RESET}"
+    fi
+  fi
+
+elif [[ $IS_WSL -eq 1 ]]; then
+  info "WSL without systemd detected — skipping service installation"
+  echo -e "  ${DIM}Run manually after connecting: crashpilot heartbeat${RESET}"
+  echo -e "  ${DIM}Or enable systemd in WSL2 for automatic heartbeat timers.${RESET}"
 
 elif [[ "$INSTALL_SYSTEMD" == "no" ]]; then
   info "Systemd install skipped (INSTALL_SYSTEMD=no)"
@@ -551,7 +565,7 @@ echo -e "  ${BOLD}Next steps:${RESET}"
 echo ""
 if [[ $CONNECTED -eq 1 ]]; then
   echo -e "  ${GREEN}✓ Connected to the dashboard${RESET} — view it at:"
-  echo -e "     ${CYAN}https://kdigitalsystems.github.io/CrashPilot/${RESET}"
+  echo -e "     ${CYAN}https://crashpilotx.com/${RESET}"
   echo ""
   echo -e "  ${BOLD}1.${RESET} ${DIM}(Optional)${RESET} Add an Anthropic API key for AI root-cause analysis:"
   echo -e "     ${CYAN}sudo nano $CONFIG_DIR/.env${RESET}   ${DIM}# set CRASHPILOT_ANTHROPIC_API_KEY${RESET}"
@@ -560,7 +574,7 @@ if [[ $CONNECTED -eq 1 ]]; then
   echo -e "     ${CYAN}sudo crashpilot analyze${RESET}"
 else
   echo -e "  ${BOLD}1.${RESET} Connect to the dashboard ${DIM}— one command, no open ports needed:${RESET}"
-  echo -e "     a. Sign in at ${CYAN}https://kdigitalsystems.github.io/CrashPilot/${RESET}"
+  echo -e "     a. Sign in at ${CYAN}https://crashpilotx.com/${RESET}"
   echo -e "        Go to ${BOLD}Systems → Add system${RESET}, enter a name, choose ${BOLD}Push mode${RESET}."
   echo -e "     b. Copy the one-line command it shows and run it here. It looks like:"
   echo -e "        ${CYAN}curl -fsSL .../install.sh | sudo bash -s -- --connect cpilot_<string>${RESET}"
