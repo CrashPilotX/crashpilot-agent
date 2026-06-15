@@ -14,6 +14,7 @@ class SystemCollector(BaseCollector):
     async def collect(self) -> dict[str, Any]:
         mem = await self._collect_memory()
         cpu = await self._collect_cpu()
+        disk = await self._collect_disk()
         pcie = await self._collect_pcie()
         last_reboot = await self._collect_last_reboot()
         boot_params = await self._collect_boot_info()
@@ -22,6 +23,7 @@ class SystemCollector(BaseCollector):
         return {
             "memory": mem,
             "cpu": cpu,
+            "disk": disk,
             "pcie_errors": pcie,
             "last_reboot_info": last_reboot,
             "boot_params": boot_params,
@@ -54,6 +56,28 @@ class SystemCollector(BaseCollector):
             }
         except OSError as e:
             return {"error": str(e)}
+
+    async def _collect_disk(self) -> dict:
+        stdout, stderr, rc = await run_cmd(
+            "df", "-h", "-P", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs", timeout=10
+        )
+        if rc != 0:
+            return {"error": stderr.strip() or "df failed"}
+
+        filesystems = []
+        for line in stdout.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+            filesystems.append({
+                "filesystem": parts[0],
+                "size": parts[1],
+                "used": parts[2],
+                "available": parts[3],
+                "use_pct": parts[4],
+                "mountpoint": parts[-1],
+            })
+        return {"filesystems": filesystems[:20]}
 
     async def _collect_cpu(self) -> dict:
         try:

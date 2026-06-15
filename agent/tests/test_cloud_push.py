@@ -64,6 +64,7 @@ class TestPushHeartbeat:
             assert "p_metrics" in payload
             assert "cpu" in payload["p_metrics"]
             assert "memory" in payload["p_metrics"]
+            assert "disk" in payload["p_metrics"]
 
     async def test_accepts_explicit_metrics(self):
         """Heartbeat can send caller-supplied live metrics."""
@@ -208,6 +209,33 @@ class TestPushHeartbeat:
         assert health["tools"]["nvidia_smi"] is False
         assert health["push_config"]["configured"] is True
         assert health["dmesg"]["critical_count"] == 2
+
+    def test_collect_disk_usage_reports_root_and_filesystems(self, monkeypatch):
+        """Heartbeat metrics include root disk pressure for low-space alerts."""
+
+        class Usage:
+            total = 100 * 1024 * 1024 * 1024
+            used = 92 * 1024 * 1024 * 1024
+            free = 8 * 1024 * 1024 * 1024
+
+        class Result:
+            returncode = 0
+            stdout = (
+                "Filesystem 1B-blocks Used Available Use% Mounted on\n"
+                "/dev/sda1 100000000000 92000000000 8000000000 92% /\n"
+                "/dev/sdb1 200000000000 150000000000 50000000000 75% /data\n"
+            )
+
+        monkeypatch.setattr(cloud_push.shutil, "disk_usage", lambda path: Usage())
+        monkeypatch.setattr(cloud_push.subprocess, "run", lambda *args, **kwargs: Result())
+
+        disk = cloud_push._collect_disk_usage()
+
+        assert disk["root"]["mountpoint"] == "/"
+        assert disk["root"]["used_pct"] == 92.0
+        assert disk["lowest_free"]["mountpoint"] == "/"
+        assert disk["most_used"]["used_pct"] == 92.0
+        assert len(disk["filesystems"]) == 2
 
 
 # ── push_report ───────────────────────────────────────────────────────────────

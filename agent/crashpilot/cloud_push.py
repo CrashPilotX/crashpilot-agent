@@ -99,6 +99,87 @@ def _read_meminfo() -> dict[str, int]:
     return parsed
 
 
+def _filesystem_entry(
+    filesystem: str,
+    mountpoint: str,
+    total_bytes: int,
+    used_bytes: int,
+    free_bytes: int,
+) -> dict[str, Any]:
+    total_gb = round(total_bytes / 1024 / 1024 / 1024, 2)
+    used_gb = round(used_bytes / 1024 / 1024 / 1024, 2)
+    free_gb = round(free_bytes / 1024 / 1024 / 1024, 2)
+    used_pct = round((used_bytes / total_bytes) * 100, 1) if total_bytes else 0
+    return {
+        "filesystem": filesystem,
+        "mountpoint": mountpoint,
+        "total_gb": total_gb,
+        "used_gb": used_gb,
+        "free_gb": free_gb,
+        "used_pct": used_pct,
+    }
+
+
+def _collect_disk_usage() -> dict[str, Any]:
+    """Collect disk pressure for root and useful local filesystems."""
+    try:
+        root_usage = shutil.disk_usage("/")
+    except OSError:
+        return {}
+
+    root = _filesystem_entry(
+        "/",
+        "/",
+        root_usage.total,
+        root_usage.used,
+        root_usage.free,
+    )
+    filesystems: list[dict[str, Any]] = []
+
+    try:
+        result = subprocess.run(
+            ["df", "-P", "-B1", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+
+    if result and result.returncode == 0:
+        for line in result.stdout.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+            filesystem, total, used, free = parts[0], parts[1], parts[2], parts[3]
+            mountpoint = parts[-1]
+            try:
+                filesystems.append(
+                    _filesystem_entry(
+                        filesystem,
+                        mountpoint,
+                        int(total),
+                        int(used),
+                        int(free),
+                    )
+                )
+            except ValueError:
+                continue
+
+    if not filesystems:
+        filesystems = [root]
+
+    most_used = max(filesystems, key=lambda item: item.get("used_pct", 0))
+    lowest_free = min(filesystems, key=lambda item: item.get("free_gb", float("inf")))
+    return {
+        "root": root,
+        "filesystems": filesystems[:12],
+        "most_used": most_used,
+        "lowest_free": lowest_free,
+    }
+
+
 def _live_dmesg_cache_path() -> Path | None:
     try:
         from .config import get_settings
@@ -264,6 +345,10 @@ def _build_live_metrics() -> dict[str, Any]:
             "swap_total_gb": round(swap_total_kb / 1024 / 1024, 2),
         }
 
+    disk = _collect_disk_usage()
+    if disk:
+        metrics["disk"] = disk
+
     if shutil.which("nvidia-smi"):
         try:
             result = subprocess.run(
@@ -389,6 +474,7 @@ def _build_telemetry_summary(telemetry: dict[str, Any]) -> dict[str, Any]:
     """Trim the raw telemetry down to what the dashboard shows (kernel log etc.)."""
     dmesg = telemetry.get("dmesg") or {}
     journal = telemetry.get("journal") or {}
+    system = telemetry.get("system") or {}
     return {
         "dmesg": {
             "critical_events": (dmesg.get("critical_events") or [])[:_MAX_CRITICAL_EVENTS],
@@ -400,6 +486,11 @@ def _build_telemetry_summary(telemetry: dict[str, Any]) -> dict[str, Any]:
         "journal": {
             "oom_events": (journal.get("oom_events") or "")[:_JOURNAL_SNIPPET_CHARS],
             "previous_boot_errors": (journal.get("previous_boot_errors") or "")[-_DMESG_TAIL_CHARS:],
+        },
+        "system": {
+            "memory": system.get("memory"),
+            "cpu": system.get("cpu"),
+            "disk": system.get("disk"),
         },
     }
 
