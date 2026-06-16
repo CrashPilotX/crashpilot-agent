@@ -173,6 +173,7 @@ def _collect_disk_usage() -> dict[str, Any]:
     most_used = max(filesystems, key=lambda item: item.get("used_pct", 0))
     lowest_free = min(filesystems, key=lambda item: item.get("free_gb", float("inf")))
     return {
+        "primary": root,
         "root": root,
         "filesystems": filesystems[:12],
         "most_used": most_used,

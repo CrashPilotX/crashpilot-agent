@@ -231,11 +231,38 @@ class TestPushHeartbeat:
 
         disk = cloud_push._collect_disk_usage()
 
+        assert disk["primary"]["mountpoint"] == "/"
+        assert disk["primary"]["used_pct"] == 92.0
         assert disk["root"]["mountpoint"] == "/"
         assert disk["root"]["used_pct"] == 92.0
         assert disk["lowest_free"]["mountpoint"] == "/"
         assert disk["most_used"]["used_pct"] == 92.0
         assert len(disk["filesystems"]) == 2
+
+    def test_collect_disk_usage_keeps_root_primary_when_boot_has_less_free_space(self, monkeypatch):
+        """Primary disk should be /, not a small /boot partition with less free GB."""
+
+        class Usage:
+            total = 106 * 1000 * 1000 * 1000
+            used = 94 * 1000 * 1000 * 1000
+            free = 6 * 1000 * 1000 * 1000
+
+        class Result:
+            returncode = 0
+            stdout = (
+                "Filesystem 1B-blocks Used Available Use% Mounted on\n"
+                "/dev/mapper/ubuntu--vg-ubuntu--lv 106000000000 94000000000 6000000000 89% /\n"
+                "/dev/nvme0n1p2 2100000000 210000000 1800000000 10% /boot\n"
+            )
+
+        monkeypatch.setattr(cloud_push.shutil, "disk_usage", lambda path: Usage())
+        monkeypatch.setattr(cloud_push.subprocess, "run", lambda *args, **kwargs: Result())
+
+        disk = cloud_push._collect_disk_usage()
+
+        assert disk["primary"]["mountpoint"] == "/"
+        assert disk["lowest_free"]["mountpoint"] == "/boot"
+        assert disk["most_used"]["mountpoint"] == "/"
 
 
 # ── push_report ───────────────────────────────────────────────────────────────
