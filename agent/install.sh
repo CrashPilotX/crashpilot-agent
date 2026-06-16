@@ -14,18 +14,25 @@ if [[ -n "$_src" && "$_src" != "bash" && -f "$_src" ]]; then
 fi
 
 if [[ -z "${REPO_DIR:-}" || ! -f "$REPO_DIR/agent/pyproject.toml" ]]; then
-  # curl-pipe install: clone the repo into a temp dir
+  # curl-pipe install: fetch the public agent bundle. The GitHub repository may
+  # stay private; the website publishes just the installable agent files.
   CLONE_DIR="$(mktemp -d)/CrashPilot"
-  echo "[info]  Standalone installer detected — cloning repository..."
-  if command -v git &>/dev/null; then
-    git clone --depth=1 https://github.com/kdigitalsystems/CrashPilot.git "$CLONE_DIR" \
-      || { echo "[err ]  git clone failed"; exit 1; }
+  BUNDLE_URL="${CRASHPILOT_BUNDLE_URL:-https://crashpilotx.com/crashpilot-agent.tar.gz}"
+  echo "[info]  Standalone installer detected — downloading agent bundle..."
+  if command -v curl &>/dev/null && command -v tar &>/dev/null; then
+    mkdir -p "$(dirname "$CLONE_DIR")"
+    curl -fsSL "$BUNDLE_URL" | tar -xz -C "$(dirname "$CLONE_DIR")" \
+      || { echo "[err ]  agent bundle download failed: $BUNDLE_URL"; exit 1; }
   else
-    echo "[err ]  git is required for curl-pipe installs. Install it with:"
-    echo "        sudo apt-get install git"
+    echo "[err ]  curl and tar are required for curl-pipe installs. Install them with:"
+    echo "        sudo apt-get install curl tar"
     exit 1
   fi
   REPO_DIR="$CLONE_DIR"
+  if [[ ! -f "$REPO_DIR/agent/pyproject.toml" ]]; then
+    echo "[err ]  downloaded bundle did not contain the CrashPilot agent"
+    exit 1
+  fi
 fi
 
 INSTALL_SYSTEMD="${INSTALL_SYSTEMD:-auto}"  # auto | yes | no
