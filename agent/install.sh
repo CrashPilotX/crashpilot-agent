@@ -63,8 +63,21 @@ section() { echo -e "\n${BOLD}── $* ─────────────�
 CONNECT_STRING="${CRASHPILOT_CONNECT:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --connect)      CONNECT_STRING="${2:-}"; shift 2 ;;
-    --connect=*)    CONNECT_STRING="${1#*=}"; shift ;;
+    --connect)
+      if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+        err "--connect requires a cpilot_<connection-string> value."
+        echo "Usage: install.sh --connect cpilot_<connection-string>"
+        exit 2
+      fi
+      CONNECT_STRING="$2"; shift 2 ;;
+    --connect=*)
+      CONNECT_STRING="${1#*=}"
+      if [[ -z "$CONNECT_STRING" ]]; then
+        err "--connect requires a cpilot_<connection-string> value."
+        echo "Usage: install.sh --connect cpilot_<connection-string>"
+        exit 2
+      fi
+      shift ;;
     cpilot_*)       CONNECT_STRING="$1"; shift ;;
     -h|--help)
       echo "Usage: install.sh [--connect cpilot_<connection-string>]"
@@ -241,6 +254,12 @@ install_optional_tools() {
   for p in "${missing[@]}"; do
     [[ -z "${seen[$p]:-}" ]] && unique+=("$p") && seen[$p]=1
   done
+
+  if [[ ! -t 0 ]]; then
+    warn "Non-interactive install detected — skipping optional packages (${unique[*]})"
+    warn "Install them later if needed: sudo apt-get install ${unique[*]}"
+    return
+  fi
 
   read -rp "$(echo -e "${YELLOW}Install missing packages (${unique[*]})?${RESET} [y/N] ")" ans
   if [[ ! "$ans" =~ ^[Yy]$ ]]; then
