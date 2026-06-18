@@ -1,0 +1,25 @@
+services:
+  crashpilot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: crashpilot:local
+    restart: unless-stopped
+    pid: host
+    privileged: true
+    ports:
+      - "7878:7878"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CRASHPILOT_DATA_DIR: /var/lib/crashpilot
+    volumes:
+      - crashpilot-data:/var/lib/crashpilot
+      - /var/log:/var/log:ro
+      - /run/log/journal:/run/log/journal:ro
+      - /sys:/sys:ro
+      - /dev:/dev
+
+volumes:
+  crashpilot-data:

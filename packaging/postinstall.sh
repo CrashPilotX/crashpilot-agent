@@ -13,6 +13,8 @@ if command -v systemctl >/dev/null 2>&1; then
     # Heartbeat timer keeps the system "online" once push mode is configured;
     # it's a no-op until then, so it's safe to enable now.
     systemctl enable --now crashpilot-heartbeat.timer >/dev/null 2>&1 || true
+    systemctl enable --now crashpilot-snapshot.timer >/dev/null 2>&1 || true
+    systemctl enable --now crashpilot-update.timer >/dev/null 2>&1 || true
 fi
 
 echo ""

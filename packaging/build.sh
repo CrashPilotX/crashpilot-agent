@@ -53,7 +53,11 @@ cp "$DIST/crashpilot" "$STAGE/usr/bin/crashpilot"
 chmod 0755 "$STAGE/usr/bin/crashpilot"
 
 # 3. Stage systemd units with the binary path baked in (/usr/bin/crashpilot)
-for unit in crashpilot.service crashpilot-heartbeat.service crashpilot-heartbeat.timer; do
+for unit in \
+  crashpilot.service \
+  crashpilot-heartbeat.service crashpilot-heartbeat.timer \
+  crashpilot-snapshot.service crashpilot-snapshot.timer \
+  crashpilot-update.service crashpilot-update.timer; do
   sed "s|__CRASHPILOT_BIN__|/usr/bin/crashpilot|g; s|/usr/local/bin/crashpilot|/usr/bin/crashpilot|g" \
     "$REPO_ROOT/systemd/$unit" > "$STAGE/lib/systemd/system/$unit"
 done

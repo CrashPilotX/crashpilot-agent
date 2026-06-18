@@ -38,6 +38,18 @@ contents:
   - src: dist/stage/lib/systemd/system/crashpilot-heartbeat.timer
     dst: /lib/systemd/system/crashpilot-heartbeat.timer
 
+  - src: dist/stage/lib/systemd/system/crashpilot-snapshot.service
+    dst: /lib/systemd/system/crashpilot-snapshot.service
+
+  - src: dist/stage/lib/systemd/system/crashpilot-snapshot.timer
+    dst: /lib/systemd/system/crashpilot-snapshot.timer
+
+  - src: dist/stage/lib/systemd/system/crashpilot-update.service
+    dst: /lib/systemd/system/crashpilot-update.service
+
+  - src: dist/stage/lib/systemd/system/crashpilot-update.timer
+    dst: /lib/systemd/system/crashpilot-update.timer
+
   - src: dist/stage/etc/crashpilot/.env
     dst: /etc/crashpilot/.env
     type: config|noreplace

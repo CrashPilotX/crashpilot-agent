@@ -3,11 +3,14 @@ Platform detection for the current CrashPilot scope.
 
 Supported for now:
   - Ubuntu Linux
+  - Ubuntu virtual machines
   - Ubuntu on WSL 1 / WSL 2
+  - Ubuntu-based Docker / OCI containers and Kubernetes pods
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -18,6 +21,8 @@ from .base import BaseCollector, run_cmd
 
 class PlatformType(str, Enum):
     BARE_METAL = "bare_metal"
+    VIRTUAL_MACHINE = "virtual_machine"
+    CONTAINER = "container"
     WSL1 = "wsl1"
     WSL2 = "wsl2"
     UNKNOWN = "unknown"
@@ -63,6 +68,31 @@ async def detect_platform() -> PlatformInfo:
     distro, distro_ver = await _detect_distro()
     init = await _detect_init()
     wsl = _detect_wsl(kernel)
+    container_runtime = _detect_container_runtime()
+    vm_hypervisor = await _detect_vm_hypervisor()
+
+    if container_runtime:
+        supported = distro == Distro.UBUNTU
+        orchestration = "kubernetes" if os.getenv("KUBERNETES_SERVICE_HOST") else None
+        return PlatformInfo(
+            platform=PlatformType.CONTAINER,
+            distro=distro,
+            distro_version=distro_ver,
+            init=init,
+            kernel=kernel,
+            arch=arch,
+            hostname=hostname,
+            is_virtual=True,
+            hypervisor=container_runtime,
+            wsl_version=None,
+            supported=supported,
+            support_note=(
+                f"Supported Ubuntu {orchestration or container_runtime} environment"
+                if supported
+                else "Unsupported container base; CrashPilot container images use Ubuntu"
+            ),
+            extra={"orchestration": orchestration},
+        )
 
     if wsl:
         platform = PlatformType.WSL1 if wsl == 1 else PlatformType.WSL2
@@ -87,20 +117,27 @@ async def detect_platform() -> PlatformInfo:
         )
 
     supported = distro == Distro.UBUNTU
+    platform = PlatformType.VIRTUAL_MACHINE if vm_hypervisor else (
+        PlatformType.BARE_METAL if supported else PlatformType.UNKNOWN
+    )
     return PlatformInfo(
-        platform=PlatformType.BARE_METAL if supported else PlatformType.UNKNOWN,
+        platform=platform,
         distro=distro,
         distro_version=distro_ver,
         init=init,
         kernel=kernel,
         arch=arch,
         hostname=hostname,
-        is_virtual=False,
-        hypervisor=None,
+        is_virtual=bool(vm_hypervisor),
+        hypervisor=vm_hypervisor,
         wsl_version=None,
         supported=supported,
         support_note=(
-            "Supported Ubuntu Linux environment"
+            (
+                f"Supported Ubuntu virtual machine ({vm_hypervisor})"
+                if vm_hypervisor
+                else "Supported Ubuntu Linux environment"
+            )
             if supported
             else "Unsupported Linux distro; CrashPilot currently supports Ubuntu only"
         ),
@@ -142,8 +179,40 @@ async def _detect_init() -> InitSystem:
     return InitSystem.NONE
 
 
+def _detect_container_runtime() -> str | None:
+    if os.getenv("KUBERNETES_SERVICE_HOST"):
+        return "kubernetes"
+    if Path("/.dockerenv").exists():
+        return "docker"
+    try:
+        cgroup = Path("/proc/1/cgroup").read_text().lower()
+    except OSError:
+        cgroup = ""
+    for marker, runtime in (
+        ("docker", "docker"),
+        ("containerd", "containerd"),
+        ("kubepods", "kubernetes"),
+        ("libpod", "podman"),
+        ("podman", "podman"),
+    ):
+        if marker in cgroup:
+            return runtime
+    return None
+
+
+async def _detect_vm_hypervisor() -> str | None:
+    out, _, code = await run_cmd("systemd-detect-virt", "--vm")
+    value = out.strip().lower()
+    if code == 0 and value and value != "none":
+        return value
+    return None
+
+
 def _detect_wsl(kernel: str) -> int | None:
     """Return 1 or 2 if running under WSL, else None."""
+    lower_kernel = kernel.lower()
+    if "microsoft" in lower_kernel or "wsl" in lower_kernel:
+        return 2 if "wsl2" in lower_kernel else 1
     try:
         osrelease = Path("/proc/sys/kernel/osrelease").read_text().lower()
         if "wsl2" in osrelease:
@@ -152,9 +221,6 @@ def _detect_wsl(kernel: str) -> int | None:
             return 1
     except OSError:
         pass
-    lower_kernel = kernel.lower()
-    if "microsoft" in lower_kernel or "wsl" in lower_kernel:
-        return 2 if "wsl2" in lower_kernel else 1
     return None
 
 
@@ -176,4 +242,5 @@ class PlatformCollector(BaseCollector):
             "wsl_version": info.wsl_version,
             "supported": info.supported,
             "support_note": info.support_note,
+            "extra": info.extra,
         }
