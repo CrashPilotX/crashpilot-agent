@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -14,20 +15,52 @@ import psutil
 
 from .storage.store import init_db, list_flight_snapshots, save_flight_snapshot
 
+_SERVICE_PATTERN = re.compile(r"(?:^|/)([^/]+\.service)(?:$|/)")
+
+
+def _process_service(pid: int | None) -> str | None:
+    if not pid:
+        return None
+    try:
+        text = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _SERVICE_PATTERN.search(text)
+    return match.group(1) if match else None
+
 
 def _top_processes(limit: int = 8) -> dict[str, list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
     for process in psutil.process_iter(
-        ["pid", "name", "username", "cmdline", "memory_info", "cpu_percent"]
+        [
+            "pid", "name", "username", "cmdline", "exe", "create_time",
+            "memory_info", "cpu_percent",
+        ]
     ):
         try:
             info = process.info
             memory = info.get("memory_info")
+            pid = info.get("pid")
+            create_time = info.get("create_time")
+            command = " ".join(info.get("cmdline") or [])[:300]
+            service = _process_service(pid)
+            identity = "|".join([
+                str(pid or ""),
+                str(round(float(create_time), 3)) if create_time else "",
+                str(info.get("exe") or ""),
+            ])
             rows.append({
-                "pid": info.get("pid"),
+                "pid": pid,
                 "name": info.get("name") or "unknown",
                 "user": info.get("username"),
-                "command": " ".join(info.get("cmdline") or [])[:300],
+                "command": command,
+                "executable": info.get("exe"),
+                "started_at": (
+                    datetime.fromtimestamp(float(create_time), timezone.utc).isoformat()
+                    if create_time else None
+                ),
+                "service": service,
+                "identity": identity,
                 "rss_mb": round((memory.rss if memory else 0) / 1024 / 1024, 1),
                 "cpu_pct": round(float(info.get("cpu_percent") or 0), 1),
             })
@@ -171,7 +204,10 @@ def _forecast(samples: list[dict], path: tuple[str, str], threshold: float) -> d
                 points.append((seconds, float(value)))
             except ValueError:
                 continue
-    if len(points) < 3:
+    if len(points) < 6:
+        return None
+    duration_hours = (points[-1][0] - points[0][0]) / 3600
+    if duration_hours < 0.5:
         return None
     start = points[0][0]
     xs = [(x - start) / 3600 for x, _ in points]
@@ -184,6 +220,12 @@ def _forecast(samples: list[dict], path: tuple[str, str], threshold: float) -> d
     slope = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys)) / denominator
     if slope <= 0.05:
         return None
+    fitted = [y_mean + slope * (x - x_mean) for x in xs]
+    residual = sum((actual - predicted) ** 2 for actual, predicted in zip(ys, fitted))
+    total = sum((actual - y_mean) ** 2 for actual in ys)
+    r_squared = 1 - (residual / total) if total else 0
+    if r_squared < 0.55:
+        return None
     hours = (threshold - ys[-1]) / slope
     if not math.isfinite(hours) or hours <= 0 or hours > 24 * 90:
         return None
@@ -191,6 +233,13 @@ def _forecast(samples: list[dict], path: tuple[str, str], threshold: float) -> d
         "current_pct": round(ys[-1], 1),
         "growth_pct_per_hour": round(slope, 2),
         "hours_to_threshold": round(hours, 1),
+        "confidence": (
+            "high" if r_squared >= 0.85 and duration_hours >= 2
+            else "medium"
+        ),
+        "r_squared": round(r_squared, 3),
+        "observation_hours": round(duration_hours, 1),
+        "sample_count": len(points),
     }
 
 
@@ -200,12 +249,13 @@ def summarize_window(hours: int = 1) -> dict[str, Any]:
     first = samples[0] if samples else None
     memory_growth: list[dict[str, Any]] = []
     if first and latest:
-        first_by_name = {
-            row["name"]: row
+        first_by_identity = {
+            row.get("identity") or f"{row.get('pid')}|{row.get('name')}": row
             for row in (first.get("processes") or {}).get("memory", [])
         }
         for row in (latest.get("processes") or {}).get("memory", []):
-            previous = first_by_name.get(row["name"])
+            identity = row.get("identity") or f"{row.get('pid')}|{row.get('name')}"
+            previous = first_by_identity.get(identity)
             if previous:
                 growth = round(row["rss_mb"] - previous["rss_mb"], 1)
                 if growth > 10:

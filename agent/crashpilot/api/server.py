@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="CrashPilot Agent API",
     description="Local crash forensics API",
-    version="0.1.0",
+    version="0.2.0",
     docs_url="/docs",
     lifespan=lifespan,
 )
@@ -106,7 +106,7 @@ app.add_middleware(
 @app.get("/health")
 async def health() -> dict:
     """Unauthenticated — used by the dashboard to check reachability."""
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.2.0"}
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +207,7 @@ async def get_status(_: str = Depends(_require_token)) -> dict[str, Any]:
     cfg = get_settings()
     reports = list_reports(limit=5)
     return {
-        "agent_version": "0.1.0",
+        "agent_version": "0.2.0",
         "reports_count": count_reports(),
         "last_analyzed_boot": get_meta("last_analyzed_boot"),
         "recent_crashes": [

@@ -76,7 +76,7 @@ def _agent_version() -> str:
     try:
         return importlib.metadata.version("crashpilot")
     except Exception:
-        return "0.1.0"
+        return "0.2.0"
 
 
 def _hostname() -> str | None:
@@ -316,6 +316,12 @@ def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
             "system_id": settings.supabase_system_id,
         }
         health["data_dir"] = str(settings.data_dir) if settings.data_dir else None
+        from .storage.store import get_meta, webhook_delivery_status
+
+        health["maintenance_until"] = (
+            get_meta("maintenance_until") or settings.maintenance_until or None
+        )
+        health["webhooks"] = webhook_delivery_status()
     except Exception as exc:
         health["config_error"] = str(exc)
     return health
@@ -457,7 +463,7 @@ async def push_heartbeat(
     system_id: str,
     agent_token: str,
     metrics: dict[str, Any] | None = None,
-) -> None:
+) -> dict[str, Any]:
     """UPSERT a heartbeat row via the agent_heartbeat RPC."""
     url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_heartbeat"
     payload = {
@@ -477,7 +483,31 @@ async def push_heartbeat(
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise RuntimeError(_explain_http_error(exc)) from exc
+        status_url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_system_status"
+        status_resp = await client.post(
+            status_url,
+            headers=_headers(anon_key),
+            json={"p_system_id": system_id, "p_agent_token": agent_token},
+        )
+
+    response_data: dict[str, Any] = {}
+    if status_resp.status_code != 404:
+        try:
+            status_resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(_explain_http_error(exc)) from exc
+        try:
+            decoded = status_resp.json()
+            if isinstance(decoded, dict):
+                response_data = decoded
+        except (ValueError, json.JSONDecodeError):
+            pass
+
+        from .storage.store import set_meta
+
+        set_meta("maintenance_until", response_data.get("maintenance_until") or "")
     log.debug("Heartbeat sent for system %s", system_id)
+    return response_data
 
 
 # Caps for what we send to the cloud — enough to be useful, small enough for JSONB.
@@ -559,5 +589,10 @@ async def push_report(
         resp.raise_for_status()
 
     report_id = report.get("id")
-    log.info("Report %s pushed to Supabase cloud", report_id)
-    return report_id
+    result = resp.json()
+    cloud_result = result if isinstance(result, str) else report_id
+    if cloud_result and cloud_result.startswith("suppressed:"):
+        log.info("Report %s suppressed by an active maintenance window", report_id)
+    else:
+        log.info("Report %s pushed to Supabase cloud", report_id)
+    return cloud_result

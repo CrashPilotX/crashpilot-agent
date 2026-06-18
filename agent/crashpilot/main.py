@@ -466,6 +466,10 @@ def heartbeat(
                 # Stop on the first failure — retry the rest next cycle.
                 logging.getLogger(__name__).warning("Backfill push failed: %s", exc)
                 break
+        if cfg.webhook_url:
+            from .notifications import flush_webhook_deliveries
+
+            await flush_webhook_deliveries(secret=cfg.webhook_secret)
         return flushed
 
     try:

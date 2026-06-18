@@ -21,16 +21,20 @@ def _sample(timestamp: str, memory: float, disk: float, rss: float) -> dict:
 def test_summarize_window_forecasts_and_attributes_growth(monkeypatch):
     samples = [
         _sample("2026-06-18T00:00:00+00:00", 60, 70, 100),
+        _sample("2026-06-18T00:30:00+00:00", 65, 72.5, 115),
         _sample("2026-06-18T01:00:00+00:00", 70, 75, 140),
-        _sample("2026-06-18T02:00:00+00:00", 80, 80, 190),
+        _sample("2026-06-18T01:30:00+00:00", 75, 77.5, 160),
+        _sample("2026-06-18T02:00:00+00:00", 80, 80, 175),
+        _sample("2026-06-18T02:30:00+00:00", 85, 82.5, 190),
     ]
     monkeypatch.setattr(flight_recorder, "list_flight_snapshots", lambda hours: samples)
 
     summary = flight_recorder.summarize_window(hours=6)
 
-    assert summary["sample_count"] == 3
-    assert summary["forecasts"]["memory"]["hours_to_threshold"] == 1.5
-    assert summary["forecasts"]["disk"]["hours_to_threshold"] == 3.0
+    assert summary["sample_count"] == 6
+    assert summary["forecasts"]["memory"]["hours_to_threshold"] == 1.0
+    assert summary["forecasts"]["memory"]["confidence"] == "high"
+    assert summary["forecasts"]["disk"]["hours_to_threshold"] == 2.5
     assert summary["process_memory_growth"][0]["name"] == "worker"
     assert summary["process_memory_growth"][0]["growth_mb"] == 90
     assert summary["failed_services"][0]["unit"] == "worker.service"

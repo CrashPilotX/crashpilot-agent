@@ -102,7 +102,7 @@ cat << 'EOF'
  | |   | '__/ _` / __| '_ \ |_) | | |/ _ \| __|
  | |___| | | (_| \__ \ | | |  __/| | | (_) | |_
   \____|_|  \__,_|___/_| |_|_|  |_|_|_\___/ \__|
-  AI-powered Linux crash forensics  v0.1
+  AI-powered Linux crash forensics  v0.2
 EOF
 }
 banner

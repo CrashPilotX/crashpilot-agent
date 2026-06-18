@@ -76,6 +76,7 @@ class TestInitDb:
         assert "crash_reports" in tables
         assert "meta" in tables
         assert "flight_snapshots" in tables
+        assert "webhook_deliveries" in tables
         con.close()
 
 

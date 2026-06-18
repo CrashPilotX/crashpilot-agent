@@ -229,11 +229,12 @@ async def check_and_analyze(force: bool = False) -> dict | None:
         if removed:
             log.info("Pruned %d report(s) older than %d days", removed, cfg.max_report_age_days)
 
+    cloud_suppressed = False
     if cfg.supabase_url and cfg.supabase_system_id and cfg.supabase_token:
         try:
             from .cloud_push import push_report as cloud_push_report
 
-            await cloud_push_report(
+            cloud_result = await cloud_push_report(
                 supabase_url=cfg.supabase_url,
                 anon_key=cfg.supabase_anon_key,
                 system_id=cfg.supabase_system_id,
@@ -241,19 +242,36 @@ async def check_and_analyze(force: bool = False) -> dict | None:
                 report=report,
             )
             mark_pushed(report_id)
+            cloud_suppressed = bool(
+                cloud_result and cloud_result.startswith("suppressed:")
+            )
         except Exception as exc:
             log.warning(
                 "Could not push report to Supabase (will retry on next heartbeat): %s",
                 exc,
             )
 
-    if cfg.webhook_url:
+    if cfg.webhook_url and not cloud_suppressed:
         try:
-            from .notifications import notify_webhook
+            from .notifications import flush_webhook_deliveries, queue_incident_webhook
 
-            await notify_webhook(cfg.webhook_url, report)
+            maintenance_until = get_meta("maintenance_until") or cfg.maintenance_until
+            in_maintenance = False
+            if maintenance_until:
+                try:
+                    until = datetime.fromisoformat(
+                        maintenance_until.replace("Z", "+00:00")
+                    )
+                    in_maintenance = until > datetime.now(timezone.utc)
+                except ValueError:
+                    log.warning("Invalid maintenance timestamp: %s", maintenance_until)
+            if not in_maintenance:
+                queue_incident_webhook(cfg.webhook_url, report)
+                await flush_webhook_deliveries(secret=cfg.webhook_secret)
+            else:
+                log.info("Webhook suppressed by maintenance window until %s", maintenance_until)
         except Exception as exc:
-            log.warning("Could not deliver incident webhook: %s", exc)
+            log.warning("Could not queue/deliver incident webhook: %s", exc)
 
     return report
 

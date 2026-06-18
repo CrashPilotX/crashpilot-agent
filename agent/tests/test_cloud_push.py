@@ -22,7 +22,12 @@ SYSTEM_ID = "11111111-1111-1111-1111-111111111111"
 AGENT_TOKEN = "test-agent-token-abc"
 
 HB_URL = f"{SUPABASE_URL}/rest/v1/rpc/agent_heartbeat"
+STATUS_URL = f"{SUPABASE_URL}/rest/v1/rpc/agent_system_status"
 RPT_URL = f"{SUPABASE_URL}/rest/v1/rpc/agent_push_report"
+
+
+def mock_legacy_status():
+    return respx.post(STATUS_URL).mock(return_value=httpx.Response(404))
 
 SAMPLE_REPORT: dict = {
     "id": "crash_abc123def456",
@@ -48,6 +53,7 @@ class TestPushHeartbeat:
         """Heartbeat posts to the correct RPC endpoint."""
         with respx.mock:
             route = respx.post(HB_URL).mock(return_value=httpx.Response(200))
+            mock_legacy_status()
             await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
             assert route.called
 
@@ -55,6 +61,7 @@ class TestPushHeartbeat:
         """Heartbeat includes system_id, agent_token, hostname, version, and metrics."""
         with respx.mock:
             route = respx.post(HB_URL).mock(return_value=httpx.Response(200))
+            mock_legacy_status()
             await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
             payload = json.loads(route.calls[0].request.content)
             assert payload["p_system_id"] == SYSTEM_ID
@@ -71,9 +78,29 @@ class TestPushHeartbeat:
         metrics = {"cpu": {"load_pct": 12.5}, "memory": {"used_pct": 42.0}}
         with respx.mock:
             route = respx.post(HB_URL).mock(return_value=httpx.Response(200))
+            mock_legacy_status()
             await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN, metrics=metrics)
             payload = json.loads(route.calls[0].request.content)
             assert payload["p_metrics"] == metrics
+
+    async def test_syncs_maintenance_status(self, monkeypatch):
+        saved: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            "crashpilot.storage.store.set_meta",
+            lambda key, value: saved.append((key, value)),
+        )
+        with respx.mock:
+            respx.post(HB_URL).mock(return_value=httpx.Response(200))
+            status = respx.post(STATUS_URL).mock(return_value=httpx.Response(200, json={
+                "maintenance_until": "2026-06-18T20:00:00Z",
+                "in_maintenance": True,
+            }))
+            result = await push_heartbeat(
+                SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN, metrics={}
+            )
+        assert status.called
+        assert result["in_maintenance"] is True
+        assert saved == [("maintenance_until", "2026-06-18T20:00:00Z")]
 
     async def test_metrics_rpc_falls_back_to_legacy_heartbeat(self):
         """Older Supabase schemas without p_metrics still receive a legacy heartbeat."""
@@ -84,6 +111,7 @@ class TestPushHeartbeat:
                     httpx.Response(200),
                 ]
             )
+            mock_legacy_status()
             await push_heartbeat(
                 SUPABASE_URL,
                 ANON_KEY,
@@ -101,6 +129,7 @@ class TestPushHeartbeat:
         """Request must include apikey and Authorization headers."""
         with respx.mock:
             route = respx.post(HB_URL).mock(return_value=httpx.Response(200))
+            mock_legacy_status()
             await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
             headers = route.calls[0].request.headers
             assert headers["apikey"] == ANON_KEY
@@ -110,6 +139,7 @@ class TestPushHeartbeat:
         """Trailing slash in supabase_url must not create a double-slash in the path."""
         with respx.mock:
             route = respx.post(HB_URL).mock(return_value=httpx.Response(200))
+            mock_legacy_status()
             await push_heartbeat(SUPABASE_URL + "/", ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
             assert route.called
 

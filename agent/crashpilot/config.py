@@ -90,6 +90,8 @@ class Settings(BaseSettings):
 
     # Optional outbound incident notification. Only HTTPS endpoints are used.
     webhook_url: str = ""
+    webhook_secret: str = ""
+    maintenance_until: str = ""
 
     def model_post_init(self, __context: object) -> None:
         # Resolve data_dir

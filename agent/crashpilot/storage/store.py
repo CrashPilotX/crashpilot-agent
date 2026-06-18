@@ -40,6 +40,21 @@ CREATE TABLE IF NOT EXISTS flight_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_flight_snapshots_captured
     ON flight_snapshots(captured_at DESC);
+
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id              TEXT PRIMARY KEY,
+    event_type      TEXT NOT NULL,
+    webhook_url     TEXT NOT NULL,
+    payload         TEXT NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    delivered_at    TEXT,
+    last_error      TEXT,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_due
+    ON webhook_deliveries(delivered_at, next_attempt_at);
 """
 
 
@@ -250,3 +265,82 @@ def list_flight_snapshots(hours: int = 1, limit: int = 240) -> list[dict]:
             (f"-{hours}", limit),
         ).fetchall()
     return [json.loads(row["snapshot"]) for row in rows]
+
+
+def enqueue_webhook_delivery(delivery: dict) -> str:
+    with _conn() as con:
+        con.execute(
+            """INSERT OR IGNORE INTO webhook_deliveries
+               (id, event_type, webhook_url, payload, next_attempt_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                delivery["id"],
+                delivery["event_type"],
+                delivery["webhook_url"],
+                json.dumps(delivery["payload"], separators=(",", ":"), sort_keys=True),
+                delivery["next_attempt_at"],
+                delivery["created_at"],
+            ),
+        )
+    return delivery["id"]
+
+
+def list_due_webhook_deliveries(limit: int = 20) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            """SELECT * FROM webhook_deliveries
+               WHERE delivered_at IS NULL
+                 AND attempts < 8
+                 AND datetime(next_attempt_at) <= datetime('now')
+               ORDER BY datetime(next_attempt_at) ASC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["payload"] = json.loads(item["payload"])
+        result.append(item)
+    return result
+
+
+def mark_webhook_delivered(delivery_id: str, delivered_at: str) -> None:
+    with _conn() as con:
+        con.execute(
+            """UPDATE webhook_deliveries
+               SET delivered_at=?, last_error=NULL
+               WHERE id=?""",
+            (delivered_at, delivery_id),
+        )
+
+
+def mark_webhook_failed(
+    delivery_id: str,
+    *,
+    attempts: int,
+    next_attempt_at: str,
+    error: str,
+) -> None:
+    with _conn() as con:
+        con.execute(
+            """UPDATE webhook_deliveries
+               SET attempts=?, next_attempt_at=?, last_error=?
+               WHERE id=?""",
+            (attempts, next_attempt_at, error[:1000], delivery_id),
+        )
+
+
+def webhook_delivery_status() -> dict[str, int]:
+    with _conn() as con:
+        row = con.execute(
+            """SELECT
+                 SUM(CASE WHEN delivered_at IS NULL AND attempts < 8 THEN 1 ELSE 0 END) AS pending,
+                 SUM(CASE WHEN delivered_at IS NULL AND attempts >= 8 THEN 1 ELSE 0 END) AS failed,
+                 SUM(CASE WHEN delivered_at IS NOT NULL THEN 1 ELSE 0 END) AS delivered
+               FROM webhook_deliveries"""
+        ).fetchone()
+    return {
+        "pending": int(row["pending"] or 0) if row else 0,
+        "failed": int(row["failed"] or 0) if row else 0,
+        "delivered": int(row["delivered"] or 0) if row else 0,
+    }
