@@ -142,8 +142,8 @@ def serve(
     console.print(Panel.fit(
         f"[bold cyan]CrashPilot API[/bold cyan] running at "
         f"[link=http://{host}:{port}]http://{host}:{port}[/link]\n"
-        f"Dashboard: [link=https://kdigitalsystems.github.io/CrashPilot]"
-        f"https://kdigitalsystems.github.io/CrashPilot[/link]",
+        f"Dashboard: [link=https://crashpilotx.com]"
+        f"https://crashpilotx.com[/link]",
         title="CrashPilot Server",
     ))
 
@@ -248,7 +248,7 @@ def token(
         print(t)
         return
 
-    dashboard = "https://kdigitalsystems.github.io/CrashPilot"
+    dashboard = "https://crashpilotx.com"
 
     # ── Push mode (recommended) ──────────────────────────────────────────────
     push_configured = bool(cfg.supabase_url and cfg.supabase_system_id and cfg.supabase_token)
@@ -374,6 +374,10 @@ def configure(
                 ["systemctl", "enable", "--now", "crashpilot-heartbeat.timer"],
                 check=True, capture_output=True,
             )
+            subprocess.run(
+                ["systemctl", "enable", "--now", "crashpilot-update.timer"],
+                check=False, capture_output=True,
+            )
             timer_enabled = True
         except (subprocess.CalledProcessError, OSError):
             pass
@@ -482,6 +486,29 @@ def heartbeat(
 
 
 @app.command()
+def update(
+    force: bool = typer.Option(False, "--force", help="Reinstall even when the bundle is unchanged"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress unchanged/success output"),
+) -> None:
+    """[bold]Update[/bold] the agent from the verified CrashPilotX public bundle."""
+    from .updater import install_latest
+
+    try:
+        result = install_latest(force=force)
+    except Exception as exc:
+        console.print(f"[red]✗ Agent update failed:[/red] {exc}")
+        raise typer.Exit(1)
+
+    if quiet:
+        return
+    if result["updated"]:
+        console.print("[green]✓ CrashPilotX agent updated successfully.[/green]")
+        console.print("[dim]The next heartbeat will use the updated agent code.[/dim]")
+    else:
+        console.print("[green]✓ CrashPilotX agent is already up to date.[/green]")
+
+
+@app.command()
 def doctor() -> None:
     """[bold]Diagnose[/bold] the agent setup and its connection to the dashboard."""
     import shutil
@@ -586,6 +613,13 @@ def doctor() -> None:
         else:
             report("Boot-time analysis", "warn", boot_state or "not found",
                    "Enable it: sudo systemctl enable crashpilot.service")
+
+        update_state = _systemctl("is-active", "crashpilot-update.timer")
+        if update_state == "active":
+            report("Automatic updates", "ok", "daily verified update check enabled")
+        else:
+            report("Automatic updates", "warn", update_state or "not found",
+                   "Re-run the installer to enable crashpilot-update.timer.")
     else:
         report("systemd", "warn", "not available",
                "Ensure something runs `crashpilot heartbeat` every ~60s to stay online.")

@@ -457,9 +457,20 @@ install_systemd_services() {
     sudo systemctl enable --now crashpilot-heartbeat.timer 2>/dev/null || true
   fi
 
+  # Install the verified daily update check.
+  if [[ -f "$service_src/crashpilot-update.service" && -f "$service_src/crashpilot-update.timer" ]]; then
+    sed "s|__CRASHPILOT_BIN__|$VENV_DIR/bin/crashpilot|g" \
+      "$service_src/crashpilot-update.service" > /tmp/crashpilot-update.service
+    sudo cp /tmp/crashpilot-update.service "$svc_dir/crashpilot-update.service"
+    sudo cp "$service_src/crashpilot-update.timer" "$svc_dir/crashpilot-update.timer"
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now crashpilot-update.timer 2>/dev/null || true
+  fi
+
   ok "systemd services installed and API server started"
   echo -e "  Boot analysis enabled: will run once per boot"
   echo -e "  Heartbeat timer: enabled (will ping dashboard every 60 s once configured)"
+  echo -e "  Automatic updates: enabled (verified daily update check)"
 }
 
 install_openrc_services() {

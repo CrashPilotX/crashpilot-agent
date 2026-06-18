@@ -1,0 +1,12 @@
+[Unit]
+Description=CrashPilotX Daily Agent Update Check
+
+[Timer]
+OnBootSec=10m
+OnCalendar=daily
+RandomizedDelaySec=2h
+Persistent=true
+Unit=crashpilot-update.service
+
+[Install]
+WantedBy=timers.target

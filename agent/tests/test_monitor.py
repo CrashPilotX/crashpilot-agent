@@ -104,3 +104,5 @@ async def test_keyless_analysis_includes_builtin_advice(monkeypatch, tmp_path):
     assert "root_cause" in report["analysis"]
     assert report["analysis"]["remediation"]
     assert report["analysis"]["monitoring_suggestions"]
+    assert report["analysis"]["forensic_snapshot"]["schema_version"] == 1
+    assert report["analysis"]["forensic_snapshot"]["fingerprint"]

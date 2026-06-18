@@ -20,6 +20,7 @@ from typing import Any
 
 from .analyzers.ai_analyzer import analyze_crash
 from .analyzers.crash_detector import CrashType, detect_crash_type
+from .analyzers.forensic_snapshot import build_forensic_snapshot
 from .analyzers.timeline import build_timeline
 from .collectors.dmesg import DmesgCollector
 from .collectors.gpu import GpuCollector
@@ -150,6 +151,15 @@ async def check_and_analyze(force: bool = False) -> dict | None:
     )
 
     timeline = build_timeline(telemetry)
+    detection_payload = {
+        "crash_type": detection.crash_type.value,
+        "severity": detection.severity.value,
+        "confidence": detection.confidence,
+        "evidence": detection.evidence,
+        "signals": detection.signals,
+        "platform": ptype,
+    }
+    forensic_snapshot = build_forensic_snapshot(telemetry, detection_payload, timeline)
     report_id = _make_report_id(boot_id)
     report = {
         "id": report_id,
@@ -173,20 +183,13 @@ async def check_and_analyze(force: bool = False) -> dict | None:
                 "signals": detection.signals,
             },
             "timeline": timeline,
+            "forensic_snapshot": forensic_snapshot,
             "ai_analyzed": False,
         },
     }
 
     save_report(report)
     log.info("Heuristic report saved: %s", report_id)
-
-    detection_payload = {
-        "crash_type": detection.crash_type.value,
-        "severity": detection.severity.value,
-        "confidence": detection.confidence,
-        "evidence": detection.evidence,
-        "platform": ptype,
-    }
 
     if cfg.anthropic_api_key:
         log.info("Running AI analysis (model: %s)...", cfg.claude_model)

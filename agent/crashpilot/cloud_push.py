@@ -284,6 +284,10 @@ def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
             "active": _systemctl_state("crashpilot-heartbeat.timer", "is-active"),
             "enabled": _systemctl_state("crashpilot-heartbeat.timer", "is-enabled"),
         },
+        "update_timer": {
+            "active": _systemctl_state("crashpilot-update.timer", "is-active"),
+            "enabled": _systemctl_state("crashpilot-update.timer", "is-enabled"),
+        },
         "tools": {
             "systemctl": bool(shutil.which("systemctl")),
             "dmesg": bool(shutil.which("dmesg")),
