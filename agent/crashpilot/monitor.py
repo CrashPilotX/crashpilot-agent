@@ -150,6 +150,13 @@ async def check_and_analyze(force: bool = False) -> dict | None:
         detection.confidence * 100,
     )
 
+    try:
+        from .flight_recorder import summarize_window
+
+        telemetry["flight_recorder"] = summarize_window(hours=1)
+    except Exception as exc:
+        telemetry["flight_recorder"] = {"error": str(exc)}
+
     timeline = build_timeline(telemetry)
     detection_payload = {
         "crash_type": detection.crash_type.value,
@@ -239,6 +246,14 @@ async def check_and_analyze(force: bool = False) -> dict | None:
                 "Could not push report to Supabase (will retry on next heartbeat): %s",
                 exc,
             )
+
+    if cfg.webhook_url:
+        try:
+            from .notifications import notify_webhook
+
+            await notify_webhook(cfg.webhook_url, report)
+        except Exception as exc:
+            log.warning("Could not deliver incident webhook: %s", exc)
 
     return report
 

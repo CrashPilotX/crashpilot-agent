@@ -31,6 +31,15 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS flight_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at TEXT NOT NULL,
+    snapshot    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_flight_snapshots_captured
+    ON flight_snapshots(captured_at DESC);
 """
 
 
@@ -213,3 +222,31 @@ def get_meta(key: str, default: str = "") -> str:
     with _conn() as con:
         row = con.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
     return row[0] if row else default
+
+
+def save_flight_snapshot(snapshot: dict, retention_hours: int = 48) -> None:
+    captured_at = snapshot.get("captured_at")
+    if not captured_at:
+        raise ValueError("flight snapshot requires captured_at")
+    with _conn() as con:
+        con.execute(
+            "INSERT INTO flight_snapshots(captured_at, snapshot) VALUES (?, ?)",
+            (captured_at, json.dumps(snapshot)),
+        )
+        con.execute(
+            """DELETE FROM flight_snapshots
+               WHERE datetime(captured_at) < datetime('now', ? || ' hours')""",
+            (f"-{retention_hours}",),
+        )
+
+
+def list_flight_snapshots(hours: int = 1, limit: int = 240) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            """SELECT snapshot FROM flight_snapshots
+               WHERE datetime(captured_at) >= datetime('now', ? || ' hours')
+               ORDER BY captured_at ASC
+               LIMIT ?""",
+            (f"-{hours}", limit),
+        ).fetchall()
+    return [json.loads(row["snapshot"]) for row in rows]

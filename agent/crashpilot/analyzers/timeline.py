@@ -76,6 +76,32 @@ def build_timeline(telemetry: dict[str, Any]) -> list[dict]:
                     f"critical attrs: {disk.get('critical_attributes', {})}",
         ))
 
+    recorder = telemetry.get("flight_recorder") or {}
+    for service in recorder.get("failed_services") or []:
+        events.append(TimelineEvent(
+            timestamp=recorder.get("last_at") or "",
+            source="systemd",
+            level="error",
+            message=f"Service failed: {service.get('unit')} {service.get('description', '')}".strip(),
+        ))
+    for change in (recorder.get("recent_package_changes") or [])[-6:]:
+        events.append(TimelineEvent(
+            timestamp="",
+            source="packages",
+            level="info",
+            message=change[:200],
+        ))
+    for process in recorder.get("process_memory_growth") or []:
+        events.append(TimelineEvent(
+            timestamp=recorder.get("last_at") or "",
+            source="process",
+            level="warning",
+            message=(
+                f"{process.get('name')} memory grew {process.get('growth_mb')} MB "
+                f"to {process.get('rss_mb')} MB"
+            ),
+        ))
+
     # Sort by timestamp (events without timestamps go to the end)
     events.sort(key=lambda e: (e.timestamp == "", e.timestamp))
 

@@ -486,6 +486,68 @@ def heartbeat(
 
 
 @app.command()
+def snapshot(
+    deep: bool = typer.Option(False, "--deep", help="Also measure top-level directory usage"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress success output"),
+) -> None:
+    """[bold]Record[/bold] a flight-recorder snapshot."""
+    from .flight_recorder import record_snapshot
+
+    try:
+        result = record_snapshot(deep=deep)
+    except Exception as exc:
+        console.print(f"[red]✗ Snapshot failed:[/red] {exc}")
+        raise typer.Exit(1)
+    if not quiet:
+        console.print(
+            "[green]✓ Flight recorder snapshot saved[/green] "
+            f"[dim]({result['captured_at']})[/dim]"
+        )
+
+
+@app.command("support-bundle")
+def support_bundle(
+    output: str = typer.Option(
+        "crashpilot-support.tar.gz",
+        "--output",
+        "-o",
+        help="Destination archive",
+        is_flag=False,
+    ),
+) -> None:
+    """Create a sanitized support bundle with diagnostics and recent reports."""
+    import importlib.metadata
+    import io
+    import json
+    import tarfile
+
+    from .config import get_settings
+    from .flight_recorder import summarize_window
+    from .storage.store import init_db, list_reports
+
+    cfg = get_settings()
+    init_db()
+    payloads = {
+        "system.json": {
+            "agent_version": importlib.metadata.version("crashpilot"),
+            "data_dir": str(cfg.data_dir),
+            "push_configured": bool(cfg.supabase_url and cfg.supabase_system_id),
+            "system_id": cfg.supabase_system_id or None,
+        },
+        "flight-recorder.json": summarize_window(hours=24),
+        "recent-reports.json": list_reports(limit=10),
+    }
+    output_path = Path(output).expanduser().resolve()
+    with tarfile.open(output_path, "w:gz") as archive:
+        for name, payload in payloads.items():
+            data = json.dumps(payload, indent=2, default=str).encode("utf-8")
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    console.print(f"[green]✓ Sanitized support bundle created:[/green] {output_path}")
+
+
+@app.command()
 def update(
     force: bool = typer.Option(False, "--force", help="Reinstall even when the bundle is unchanged"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress unchanged/success output"),
@@ -620,6 +682,13 @@ def doctor() -> None:
         else:
             report("Automatic updates", "warn", update_state or "not found",
                    "Re-run the installer to enable crashpilot-update.timer.")
+
+        snapshot_state = _systemctl("is-active", "crashpilot-snapshot.timer")
+        if snapshot_state == "active":
+            report("Flight recorder", "ok", "one-minute snapshots enabled")
+        else:
+            report("Flight recorder", "warn", snapshot_state or "not found",
+                   "Re-run the installer to enable crashpilot-snapshot.timer.")
     else:
         report("systemd", "warn", "not available",
                "Ensure something runs `crashpilot heartbeat` every ~60s to stay online.")

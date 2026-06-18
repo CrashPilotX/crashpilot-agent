@@ -1,0 +1,12 @@
+[Unit]
+Description=CrashPilotX Flight Recorder Timer
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Persistent=true
+Unit=crashpilot-snapshot.service
+
+[Install]
+WantedBy=timers.target

@@ -7,7 +7,9 @@ import json
 from typing import Any
 
 FORENSIC_SCHEMA_VERSION = 1
-_COLLECTOR_NAMES = ("journal", "dmesg", "system", "smart", "gpu", "thermal", "wsl")
+_COLLECTOR_NAMES = (
+    "journal", "dmesg", "system", "smart", "gpu", "thermal", "wsl", "flight_recorder"
+)
 
 
 def _collector_status(value: Any) -> str:
@@ -82,5 +84,17 @@ def build_forensic_snapshot(
             "kernel": platform.get("kernel"),
             "memory": system.get("memory"),
             "root_disk": _root_disk(system),
+        },
+        "pre_failure_context": {
+            "forecasts": (telemetry.get("flight_recorder") or {}).get("forecasts", {}),
+            "process_memory_growth": (
+                telemetry.get("flight_recorder") or {}
+            ).get("process_memory_growth", []),
+            "failed_services": (
+                telemetry.get("flight_recorder") or {}
+            ).get("failed_services", []),
+            "recent_package_changes": (
+                telemetry.get("flight_recorder") or {}
+            ).get("recent_package_changes", []),
         },
     }

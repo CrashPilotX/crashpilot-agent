@@ -288,6 +288,10 @@ def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
             "active": _systemctl_state("crashpilot-update.timer", "is-active"),
             "enabled": _systemctl_state("crashpilot-update.timer", "is-enabled"),
         },
+        "snapshot_timer": {
+            "active": _systemctl_state("crashpilot-snapshot.timer", "is-active"),
+            "enabled": _systemctl_state("crashpilot-snapshot.timer", "is-enabled"),
+        },
         "tools": {
             "systemctl": bool(shutil.which("systemctl")),
             "dmesg": bool(shutil.which("dmesg")),
@@ -403,6 +407,13 @@ def _build_live_metrics() -> dict[str, Any]:
         metrics["gpu"] = {"nvidia": {"available": False, "gpus": []}}
 
     metrics["dmesg"] = _collect_live_dmesg()
+    try:
+        from .flight_recorder import record_snapshot, summarize_window
+
+        record_snapshot()
+        metrics["flight_recorder"] = summarize_window(hours=6)
+    except Exception as exc:
+        metrics["flight_recorder"] = {"error": str(exc)}
     metrics["agent_health"] = _build_agent_health(metrics["dmesg"])
 
     return metrics
@@ -480,6 +491,9 @@ def _build_telemetry_summary(telemetry: dict[str, Any]) -> dict[str, Any]:
     dmesg = telemetry.get("dmesg") or {}
     journal = telemetry.get("journal") or {}
     system = telemetry.get("system") or {}
+    flight_recorder = dict(telemetry.get("flight_recorder") or {})
+    if flight_recorder.get("samples"):
+        flight_recorder["samples"] = flight_recorder["samples"][-15:]
     return {
         "dmesg": {
             "critical_events": (dmesg.get("critical_events") or [])[:_MAX_CRITICAL_EVENTS],
@@ -497,6 +511,7 @@ def _build_telemetry_summary(telemetry: dict[str, Any]) -> dict[str, Any]:
             "cpu": system.get("cpu"),
             "disk": system.get("disk"),
         },
+        "flight_recorder": flight_recorder,
     }
 
 

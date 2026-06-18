@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     supabase_system_id: str = ""
     supabase_token: str = ""  # agent token stored in the Supabase systems table
 
+    # Optional outbound incident notification. Only HTTPS endpoints are used.
+    webhook_url: str = ""
+
     def model_post_init(self, __context: object) -> None:
         # Resolve data_dir
         if self.data_dir is None:

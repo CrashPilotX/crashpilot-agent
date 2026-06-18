@@ -30,9 +30,11 @@ from crashpilot.storage.store import (  # noqa: E402
     get_meta,
     get_report,
     init_db,
+    list_flight_snapshots,
     list_reports,
     list_unpushed,
     mark_pushed,
+    save_flight_snapshot,
     save_report,
     set_meta,
     update_analysis,
@@ -73,6 +75,7 @@ class TestInitDb:
         ).fetchall()}
         assert "crash_reports" in tables
         assert "meta" in tables
+        assert "flight_snapshots" in tables
         con.close()
 
 
@@ -250,3 +253,15 @@ class TestMeta:
         set_meta("key", "v1")
         set_meta("key", "v2")
         assert get_meta("key") == "v2"
+
+
+class TestFlightSnapshots:
+    def test_snapshot_round_trip(self):
+        captured_at = datetime.now(timezone.utc).isoformat()
+        save_flight_snapshot({"captured_at": captured_at, "memory": {"used_pct": 42}})
+        snapshots = list_flight_snapshots(hours=1)
+        assert snapshots == [{"captured_at": captured_at, "memory": {"used_pct": 42}}]
+
+    def test_snapshot_requires_timestamp(self):
+        with pytest.raises(ValueError, match="captured_at"):
+            save_flight_snapshot({"memory": {"used_pct": 42}})
