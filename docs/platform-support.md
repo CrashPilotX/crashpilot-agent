@@ -8,17 +8,19 @@ CLI/storage smoke test, or an actual deployment.
 
 | Platform | Architectures | CI evidence | Support level |
 |---|---|---|---|
-| Ubuntu 22.04 VM or host | amd64 | Full Python suite, CLI/storage smoke, systemd unit validation | Supported |
-| Ubuntu 24.04 VM or host | amd64, arm64 | Full Python suite, CLI/storage smoke, package build, systemd validation | Supported |
+| Ubuntu 22.04 VM or host | amd64 | Matching Ubuntu container runs Python, CLI/storage, installer, and systemd unit checks | Supported |
+| Ubuntu 24.04 VM or host | amd64, arm64 | Matching Ubuntu containers run Python, CLI/storage, packages, and systemd checks | Supported |
 | Ubuntu on WSL1/WSL2 | amd64, arm64 where available | WSL detection and collector contracts; installer tests | Supported, WSL2 + systemd recommended |
 | Docker / OCI on Ubuntu hosts | amd64, arm64 | Ubuntu 22.04/24.04 image builds, CLI, snapshot, API health, Compose validation | Supported |
 | Kubernetes Linux nodes | amd64; image also published for arm64 | Kind cluster deploys and rolls out the privileged DaemonSet | Supported node-agent deployment |
 | Bare-metal Ubuntu | amd64, arm64 | Same package and collector path as Ubuntu VMs; hardware collectors covered by unit tests | Supported; hardware-specific CI is simulated |
 
-Self-hosted Ubuntu runners exercise the native host/VM path on amd64 and arm64.
-CI cannot boot WSL or attach every SMART/NVIDIA hardware combination; those
-paths are covered by deterministic collector tests and should also be validated
-on representative hardware before large fleet rollouts.
+Self-hosted Linux runners execute all checks in disposable Ubuntu 22.04 or 24.04
+containers on amd64 and arm64. This validates user space and packaging without
+allowing dependencies from one repository to contaminate another. CI cannot
+boot a complete VM/WSL kernel or attach every SMART/NVIDIA hardware combination;
+those paths are covered by deterministic collector tests and should also be
+validated on representative hardware before large fleet rollouts.
 
 ## Docker
 
@@ -68,9 +70,10 @@ Ubuntu node instead.
 ## CI gates
 
 - `Tests`: Python 3.10–3.12 behavior.
-- `Platform CI`: Ubuntu 22.04/24.04 VM runners, amd64/arm64, systemd units, and
-  self-contained package builds.
+- `Platform CI`: Ubuntu 22.04/24.04 job containers, amd64/arm64, systemd units,
+  and self-contained package builds.
 - `Container and Kubernetes CI`: Docker/OCI images, Compose, Kind deployment,
-  and multi-architecture GHCR publication.
+  and multi-architecture GHCR publication using an isolated Docker-in-Docker
+  daemon.
 - `Web CI`: dashboard type checks, unit tests, production build, and desktop/mobile browser tests.
 - `Schema CI`: clean PostgreSQL/Supabase schema integration.
