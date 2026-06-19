@@ -16,7 +16,9 @@ RUN apt-get update \
 WORKDIR /opt/crashpilot
 COPY agent/ /opt/crashpilot/agent/
 RUN python3 -m venv /opt/crashpilot/venv \
-    && /opt/crashpilot/venv/bin/pip install --no-cache-dir /opt/crashpilot/agent
+    && /opt/crashpilot/venv/bin/pip install --no-cache-dir --upgrade "pip>=26.1.2" \
+    && /opt/crashpilot/venv/bin/pip install --no-cache-dir /opt/crashpilot/agent \
+    && /opt/crashpilot/venv/bin/pip uninstall --yes pip setuptools wheel
 ENV PATH="/opt/crashpilot/venv/bin:${PATH}"
 
 COPY docker/entrypoint.sh /usr/local/bin/crashpilot-entrypoint

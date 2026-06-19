@@ -78,4 +78,6 @@ nfpm package --config "$REPO_ROOT/packaging/nfpm.yaml" --packager deb --target "
 ( cd "$DIST" && sha256sum crashpilot ./*.deb > SHA256SUMS )
 
 echo "==> Done. Artifacts in $DIST:"
-ls -1 "$DIST" | grep -vE '^(build|stage|.*\.spec)$' || true
+find "$DIST" -maxdepth 1 -mindepth 1 \
+  ! -name build ! -name stage ! -name '*.spec' \
+  -printf '%f\n'

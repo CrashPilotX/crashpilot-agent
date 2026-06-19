@@ -22,6 +22,7 @@ from .analyzers.ai_analyzer import analyze_crash
 from .analyzers.crash_detector import CrashType, detect_crash_type
 from .analyzers.forensic_snapshot import build_forensic_snapshot
 from .analyzers.timeline import build_timeline
+from .collectors.base import BaseCollector
 from .collectors.dmesg import DmesgCollector
 from .collectors.gpu import GpuCollector
 from .collectors.journal import JournalCollector
@@ -66,7 +67,7 @@ async def collect_telemetry() -> dict[str, Any]:
         platform_info.init.value,
     )
 
-    collectors = [SystemCollector()]
+    collectors: list[BaseCollector] = [SystemCollector()]
 
     if ptype in (PlatformType.WSL1, PlatformType.WSL2):
         collectors.append(WslCollector())

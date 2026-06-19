@@ -94,14 +94,12 @@ class Settings(BaseSettings):
     maintenance_until: str = ""
 
     def model_post_init(self, __context: object) -> None:
-        # Resolve data_dir
-        if self.data_dir is None:
-            object.__setattr__(self, "data_dir", _default_data_dir())
-        self.data_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+        data_dir = self.data_dir or _default_data_dir()
+        data_dir.mkdir(parents=True, exist_ok=True)
+        object.__setattr__(self, "data_dir", data_dir)
 
-        # Resolve db_path
         if self.db_path is None:
-            object.__setattr__(self, "db_path", self.data_dir / "crashpilot.db")
+            object.__setattr__(self, "db_path", data_dir / "crashpilot.db")
 
 
 _settings: Optional[Settings] = None

@@ -178,7 +178,13 @@ fi
 # ── Python check ──────────────────────────────────────────────────────────────
 section "Checking Python"
 
-_sudo() { [[ $EUID -eq 0 ]] && "$@" || sudo "$@"; }
+_sudo() {
+  if [[ $EUID -eq 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
 
 install_python() {
   _sudo apt-get install -y python3 python3-pip python3-venv
@@ -314,7 +320,11 @@ section "Setting up configuration"
 mkdir -p "$CONFIG_DIR" "$DATA_DIR"
 # Root installs keep the directory traversable for packaged tooling, but the
 # .env file itself contains secrets once push mode is configured.
-[[ $EUID -eq 0 ]] && chmod 755 "$CONFIG_DIR" || chmod 700 "$CONFIG_DIR"
+if [[ $EUID -eq 0 ]]; then
+  chmod 755 "$CONFIG_DIR"
+else
+  chmod 700 "$CONFIG_DIR"
+fi
 
 if [[ ! -f "$CONFIG_DIR/.env" ]]; then
   cat > "$CONFIG_DIR/.env" << 'ENVEOF'

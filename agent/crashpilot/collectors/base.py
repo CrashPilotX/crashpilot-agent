@@ -25,7 +25,11 @@ async def run_cmd(
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(stdin_bytes), timeout=timeout
         )
-        return stdout.decode(errors="replace"), stderr.decode(errors="replace"), proc.returncode
+        return (
+            stdout.decode(errors="replace"),
+            stderr.decode(errors="replace"),
+            proc.returncode if proc.returncode is not None else -1,
+        )
     except asyncio.TimeoutError:
         # Kill the process so it doesn't linger as a zombie
         if proc is not None:

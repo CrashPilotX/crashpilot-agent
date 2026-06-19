@@ -35,11 +35,13 @@ dev = [
     "respx>=0.21",          # mock httpx calls in tests
     "mypy>=1.13",
     "ruff>=0.8",
+    "types-psutil>=7.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100

@@ -42,7 +42,8 @@ You analyze telemetry evidence collected immediately after an abnormal event:
 PLATFORM-SPECIFIC AWARENESS:
 - WSL1: No kernel — crashes are Windows host issues. Analyze Windows Event Log data.
 - WSL2: Has a kernel but no ACPI/hardware sensors. OOM is often .wslconfig memory limit.
-- Non-Ubuntu distros and Docker/Kubernetes deployments are out of scope for now.
+- Docker/Kubernetes: distinguish container-local evidence from mounted host evidence.
+- Non-Ubuntu distros are out of scope for now.
 
 Your analysis must be:
 1. EVIDENCE-BASED: Every conclusion must cite specific log lines or metrics
@@ -90,7 +91,7 @@ ANALYSIS_SCHEMA = {
 
 def _truncate_telemetry(telemetry: dict, max_chars: int = 80_000) -> dict:
     """Trim large text fields to fit within Claude's context window."""
-    result = {}
+    result: dict[str, Any] = {}
     for key, val in telemetry.items():
         if isinstance(val, dict):
             result[key] = _truncate_telemetry(val, max_chars // len(telemetry))
@@ -99,6 +100,18 @@ def _truncate_telemetry(telemetry: dict, max_chars: int = 80_000) -> dict:
         else:
             result[key] = val
     return result
+
+
+def _extract_text_content(content: list[Any]) -> str:
+    """Join text blocks while safely ignoring thinking and tool-result blocks."""
+    text_parts = [
+        text.strip()
+        for block in content
+        if isinstance((text := getattr(block, "text", None)), str) and text.strip()
+    ]
+    if not text_parts:
+        raise ValueError("Anthropic response contained no text content")
+    return "\n".join(text_parts)
 
 
 async def analyze_crash(
@@ -151,7 +164,7 @@ async def analyze_crash(
             messages=[{"role": "user", "content": user_prompt}],
         )
 
-        raw_text = message.content[0].text.strip()
+        raw_text = _extract_text_content(message.content)
 
         # Extract JSON from the response (may be wrapped in markdown)
         json_text = _extract_json(raw_text)
