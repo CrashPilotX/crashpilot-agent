@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        bash build-essential ca-certificates curl dpkg-dev git gnupg jq \
+        bash build-essential ca-certificates curl dpkg-dev git gnupg iproute2 jq \
         libffi-dev libssl-dev postgresql-client python3 python3-pip python3-venv \
         shellcheck sudo systemd tar unzip xz-utils zip \
     && install -m 0755 -d /etc/apt/keyrings \
