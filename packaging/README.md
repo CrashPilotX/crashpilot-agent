@@ -26,7 +26,7 @@ install with apt without requiring Python on the target.
 checks:
 
 - PyInstaller hidden imports through `crashpilot --help` and `snapshot`.
-- Native arm64 execution on `ubuntu-24.04-arm`.
+- Native arm64 execution on the self-hosted Ubuntu 24.04 ARM64 runner.
 - Package metadata and expected filesystem contents.
 - systemd unit syntax on Ubuntu 22.04 and 24.04.
 

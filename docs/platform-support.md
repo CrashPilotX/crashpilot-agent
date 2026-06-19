@@ -15,10 +15,10 @@ CLI/storage smoke test, or an actual deployment.
 | Kubernetes Linux nodes | amd64; image also published for arm64 | Kind cluster deploys and rolls out the privileged DaemonSet | Supported node-agent deployment |
 | Bare-metal Ubuntu | amd64, arm64 | Same package and collector path as Ubuntu VMs; hardware collectors covered by unit tests | Supported; hardware-specific CI is simulated |
 
-GitHub-hosted Ubuntu jobs run in virtual machines, so the VM path is
-continuously exercised. CI cannot boot WSL or attach real SMART/NVIDIA hardware;
-those paths are covered by deterministic collector tests and should also be
-validated on representative hardware before large fleet rollouts.
+Self-hosted Ubuntu runners exercise the native host/VM path on amd64 and arm64.
+CI cannot boot WSL or attach every SMART/NVIDIA hardware combination; those
+paths are covered by deterministic collector tests and should also be validated
+on representative hardware before large fleet rollouts.
 
 ## Docker
 
