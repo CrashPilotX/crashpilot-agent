@@ -3,7 +3,7 @@
 #
 # VERSION and ARCH are taken from the environment (set by build.sh / CI).
 name: crashpilot
-arch: ${ARCH:-amd64}
+arch: ${ARCH}
 platform: linux
 version: ${VERSION}
 version_schema: none

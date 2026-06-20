@@ -21,9 +21,10 @@ DIST="$REPO_ROOT/dist"
 STAGE="$DIST/stage"
 
 VERSION="${VERSION:-$(grep -m1 '^version' "$AGENT_DIR/pyproject.toml" | sed -E 's/.*"(.*)".*/\1/')}"
-export VERSION
+ARCH="${ARCH:-$(dpkg --print-architecture)}"
+export ARCH VERSION
 
-echo "==> Building CrashPilot $VERSION"
+echo "==> Building CrashPilot $VERSION for $ARCH"
 rm -rf "$DIST"
 mkdir -p "$DIST" "$STAGE/usr/bin" "$STAGE/lib/systemd/system" "$STAGE/etc/crashpilot"
 
