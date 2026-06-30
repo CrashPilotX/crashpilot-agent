@@ -274,9 +274,14 @@ def _collect_network_usage() -> dict[str, Any]:
     counters["tx_mbps"] = None
 
     if previous:
-        elapsed = now - float(previous.get("saved_at", 0) or 0)
-        prev_rx = int(previous.get("rx_bytes", 0) or 0)
-        prev_tx = int(previous.get("tx_bytes", 0) or 0)
+        try:
+            elapsed = now - float(previous.get("saved_at", 0) or 0)
+            prev_rx = int(previous.get("rx_bytes", 0) or 0)
+            prev_tx = int(previous.get("tx_bytes", 0) or 0)
+        except (TypeError, ValueError):
+            elapsed = 0
+            prev_rx = counters["rx_bytes"]
+            prev_tx = counters["tx_bytes"]
         rx_delta = counters["rx_bytes"] - prev_rx
         tx_delta = counters["tx_bytes"] - prev_tx
         # Interface counters can reset on reboot/link flap; only compute sane positive rates.

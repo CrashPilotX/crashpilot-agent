@@ -455,6 +455,23 @@ class TestNetworkMetrics:
             "tx_packets": 50,
         }]
 
+    def test_collect_network_usage_ignores_malformed_cache(self, monkeypatch, tmp_path):
+        cache = tmp_path / "network_counters.json"
+        cache.write_text('{"saved_at":"not-a-time","rx_bytes":"bad","tx_bytes":0}', encoding="utf-8")
+        monkeypatch.setattr(
+            cloud_push,
+            "_read_network_counters",
+            lambda: {"interfaces": [{"name": "eth0"}], "rx_bytes": 11_000_000, "tx_bytes": 7_000_000},
+        )
+        monkeypatch.setattr(cloud_push, "_network_counters_cache_path", lambda: cache)
+        monkeypatch.setattr(cloud_push.time, "time", lambda: 1010.0)
+
+        current = cloud_push._collect_network_usage()
+
+        assert current["rx_mbps"] is None
+        assert current["tx_mbps"] is None
+        assert current["interfaces"] == [{"name": "eth0"}]
+
     def test_collect_network_usage_reports_rates_from_previous_sample(self, monkeypatch, tmp_path):
         samples = iter([
             {"interfaces": [{"name": "eth0"}], "rx_bytes": 1_000_000, "tx_bytes": 2_000_000},
