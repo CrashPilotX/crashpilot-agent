@@ -428,3 +428,50 @@ class TestPushReport:
             )
             await push_report(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN, SAMPLE_REPORT)
             assert "application/json" in route.calls[0].request.headers["content-type"]
+
+
+
+class TestNetworkMetrics:
+    def test_read_network_counters_skips_loopback_and_virtual_links(self, tmp_path):
+        proc = tmp_path / "net_dev"
+        proc.write_text(
+            "Inter-|   Receive                                                |  Transmit\n"
+            " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n"
+            "    lo: 1000 10 0 0 0 0 0 0 1000 10 0 0 0 0 0 0\n"
+            "  eth0: 125000000 100 0 0 0 0 0 0 25000000 50 0 0 0 0 0 0\n"
+            "docker0: 999 9 0 0 0 0 0 0 999 9 0 0 0 0 0 0\n",
+            encoding="utf-8",
+        )
+
+        counters = cloud_push._read_network_counters(proc)
+
+        assert counters["rx_bytes"] == 125000000
+        assert counters["tx_bytes"] == 25000000
+        assert counters["interfaces"] == [{
+            "name": "eth0",
+            "rx_bytes": 125000000,
+            "tx_bytes": 25000000,
+            "rx_packets": 100,
+            "tx_packets": 50,
+        }]
+
+    def test_collect_network_usage_reports_rates_from_previous_sample(self, monkeypatch, tmp_path):
+        samples = iter([
+            {"interfaces": [{"name": "eth0"}], "rx_bytes": 1_000_000, "tx_bytes": 2_000_000},
+            {"interfaces": [{"name": "eth0"}], "rx_bytes": 11_000_000, "tx_bytes": 7_000_000},
+        ])
+        times = iter([1000.0, 1010.0])
+        cache = tmp_path / "network_counters.json"
+        monkeypatch.setattr(cloud_push, "_read_network_counters", lambda: next(samples))
+        monkeypatch.setattr(cloud_push, "_network_counters_cache_path", lambda: cache)
+        monkeypatch.setattr(cloud_push.time, "time", lambda: next(times))
+
+        baseline = cloud_push._collect_network_usage()
+        current = cloud_push._collect_network_usage()
+
+        assert baseline["rx_mbps"] is None
+        assert current["rate_interval_seconds"] == 10.0
+        assert current["rx_bytes_per_second"] == 1_000_000.0
+        assert current["tx_bytes_per_second"] == 500_000.0
+        assert current["rx_mbps"] == 8.0
+        assert current["tx_mbps"] == 4.0

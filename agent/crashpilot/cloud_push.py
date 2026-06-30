@@ -181,6 +181,130 @@ def _collect_disk_usage() -> dict[str, Any]:
     }
 
 
+_NETWORK_INTERFACE_PREFIXES_TO_SKIP = (
+    "br-",
+    "cni",
+    "docker",
+    "flannel",
+    "kube-ipvs",
+    "lo",
+    "veth",
+    "virbr",
+)
+
+
+def _network_counters_cache_path() -> Path | None:
+    try:
+        from .config import get_settings
+
+        data_dir = get_settings().data_dir
+        if data_dir is None:
+            return None
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / "network_counters.json"
+    except Exception:
+        return None
+
+
+def _read_network_counters(proc_net_dev: Path = Path("/proc/net/dev")) -> dict[str, Any]:
+    """Read /proc/net/dev and aggregate physical/default network interfaces."""
+    interfaces: list[dict[str, Any]] = []
+    try:
+        lines = proc_net_dev.read_text(encoding="utf-8").splitlines()[2:]
+    except OSError:
+        return {}
+
+    for line in lines:
+        if ":" not in line:
+            continue
+        raw_name, raw_values = line.split(":", 1)
+        name = raw_name.strip()
+        if not name or name.startswith(_NETWORK_INTERFACE_PREFIXES_TO_SKIP):
+            continue
+        parts = raw_values.split()
+        if len(parts) < 16:
+            continue
+        try:
+            rx_bytes = int(parts[0])
+            rx_packets = int(parts[1])
+            tx_bytes = int(parts[8])
+            tx_packets = int(parts[9])
+        except ValueError:
+            continue
+        if rx_bytes == 0 and tx_bytes == 0:
+            continue
+        interfaces.append({
+            "name": name,
+            "rx_bytes": rx_bytes,
+            "tx_bytes": tx_bytes,
+            "rx_packets": rx_packets,
+            "tx_packets": tx_packets,
+        })
+
+    if not interfaces:
+        return {}
+
+    return {
+        "interfaces": interfaces[:12],
+        "rx_bytes": sum(item["rx_bytes"] for item in interfaces),
+        "tx_bytes": sum(item["tx_bytes"] for item in interfaces),
+    }
+
+
+def _collect_network_usage() -> dict[str, Any]:
+    """Collect current network byte counters and RX/TX throughput since last heartbeat."""
+    counters = _read_network_counters()
+    if not counters:
+        return {}
+
+    now = time.time()
+    cache_path = _network_counters_cache_path()
+    previous: dict[str, Any] | None = None
+    if cache_path is not None:
+        try:
+            previous = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            previous = None
+
+    counters["sampled_at"] = datetime.now(timezone.utc).isoformat()
+    counters["rate_interval_seconds"] = None
+    counters["rx_bytes_per_second"] = None
+    counters["tx_bytes_per_second"] = None
+    counters["rx_mbps"] = None
+    counters["tx_mbps"] = None
+
+    if previous:
+        elapsed = now - float(previous.get("saved_at", 0) or 0)
+        prev_rx = int(previous.get("rx_bytes", 0) or 0)
+        prev_tx = int(previous.get("tx_bytes", 0) or 0)
+        rx_delta = counters["rx_bytes"] - prev_rx
+        tx_delta = counters["tx_bytes"] - prev_tx
+        # Interface counters can reset on reboot/link flap; only compute sane positive rates.
+        if elapsed > 0 and rx_delta >= 0 and tx_delta >= 0:
+            rx_bps = rx_delta / elapsed
+            tx_bps = tx_delta / elapsed
+            counters["rate_interval_seconds"] = round(elapsed, 1)
+            counters["rx_bytes_per_second"] = round(rx_bps, 1)
+            counters["tx_bytes_per_second"] = round(tx_bps, 1)
+            counters["rx_mbps"] = round((rx_bps * 8) / 1_000_000, 2)
+            counters["tx_mbps"] = round((tx_bps * 8) / 1_000_000, 2)
+
+    if cache_path is not None:
+        try:
+            cache_path.write_text(
+                json.dumps({
+                    "saved_at": now,
+                    "rx_bytes": counters["rx_bytes"],
+                    "tx_bytes": counters["tx_bytes"],
+                }),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    return counters
+
+
 def _live_dmesg_cache_path() -> Path | None:
     try:
         from .config import get_settings
@@ -363,6 +487,10 @@ def _build_live_metrics() -> dict[str, Any]:
     disk = _collect_disk_usage()
     if disk:
         metrics["disk"] = disk
+
+    network = _collect_network_usage()
+    if network:
+        metrics["network"] = network
 
     if shutil.which("nvidia-smi"):
         try:
