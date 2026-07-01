@@ -193,6 +193,116 @@ _NETWORK_INTERFACE_PREFIXES_TO_SKIP = (
 )
 
 
+def _speedtest_cache_path() -> Path | None:
+    try:
+        from .config import get_settings
+
+        data_dir = get_settings().data_dir
+        if data_dir is None:
+            return None
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / "speedtest_result.json"
+    except Exception:
+        return None
+
+
+def _load_cached_speedtest(path: Path | None, max_age_seconds: int) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8"))
+        saved_at = float(cache.get("saved_at", 0))
+        result = cache.get("result")
+        if isinstance(result, dict) and time.time() - saved_at <= max_age_seconds:
+            cached = dict(result)
+            cached["cached"] = True
+            cached["age_seconds"] = round(time.time() - saved_at, 1)
+            return cached
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _collect_speedtest_capacity() -> dict[str, Any] | None:
+    """Optionally run speedtest-cli and return internet capacity in Mbps."""
+    try:
+        from .config import get_settings
+
+        settings = get_settings()
+    except Exception as exc:
+        return {"enabled": True, "available": False, "error": str(exc)}
+
+    if not getattr(settings, "bandwidth_speedtest_enabled", False):
+        return None
+
+    interval = max(int(getattr(settings, "bandwidth_speedtest_interval_seconds", 21600)), 300)
+    timeout = max(int(getattr(settings, "bandwidth_speedtest_timeout_seconds", 90)), 10)
+    cache_path = _speedtest_cache_path()
+    cached = _load_cached_speedtest(cache_path, interval)
+    if cached:
+        return cached
+
+    if not shutil.which("speedtest-cli"):
+        return {
+            "enabled": True,
+            "available": False,
+            "cached": False,
+            "error": "speedtest-cli is not installed",
+        }
+
+    try:
+        completed = subprocess.run(
+            ["speedtest-cli", "--json", "--secure"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"enabled": True, "available": False, "cached": False, "error": str(exc)}
+
+    if completed.returncode != 0:
+        error = (completed.stderr or completed.stdout or "speedtest-cli failed").strip()
+        return {"enabled": True, "available": False, "cached": False, "error": error[:500]}
+
+    try:
+        payload = json.loads(completed.stdout)
+        download_bps = float(payload.get("download", 0) or 0)
+        upload_bps = float(payload.get("upload", 0) or 0)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return {"enabled": True, "available": False, "cached": False, "error": f"invalid speedtest-cli JSON: {exc}"}
+
+    server = payload.get("server") if isinstance(payload.get("server"), dict) else {}
+    result: dict[str, Any] = {
+        "enabled": True,
+        "available": True,
+        "cached": False,
+        "tested_at": datetime.now(timezone.utc).isoformat(),
+        "download_mbps": round(download_bps / 1_000_000, 2),
+        "upload_mbps": round(upload_bps / 1_000_000, 2),
+    }
+    ping = payload.get("ping")
+    if isinstance(ping, (int, float)):
+        result["ping_ms"] = round(float(ping), 1)
+    if server:
+        result["server"] = {
+            key: server.get(key)
+            for key in ("sponsor", "name", "country", "host")
+            if server.get(key)
+        }
+
+    if cache_path is not None:
+        try:
+            cache_path.write_text(
+                json.dumps({"saved_at": time.time(), "result": result}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    return result
+
+
 def _network_counters_cache_path() -> Path | None:
     try:
         from .config import get_settings
@@ -306,6 +416,10 @@ def _collect_network_usage() -> dict[str, Any]:
             )
         except OSError:
             pass
+
+    speedtest = _collect_speedtest_capacity()
+    if speedtest:
+        counters["speedtest"] = speedtest
 
     return counters
 

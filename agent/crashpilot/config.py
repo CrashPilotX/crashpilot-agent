@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     webhook_secret: str = ""
     maintenance_until: str = ""
 
+    # Optional capacity test. Disabled by default because it uses external
+    # speedtest servers and can consume significant bandwidth. Passive RX/TX
+    # throughput is always collected from /proc/net/dev.
+    bandwidth_speedtest_enabled: bool = False
+    bandwidth_speedtest_interval_seconds: int = 21600
+    bandwidth_speedtest_timeout_seconds: int = 90
+
     def model_post_init(self, __context: object) -> None:
         data_dir = self.data_dir or _default_data_dir()
         data_dir.mkdir(parents=True, exist_ok=True)

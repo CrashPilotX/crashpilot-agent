@@ -345,6 +345,12 @@ CRASHPILOT_JOURNAL_LINES=5000
 CRASHPILOT_DMESG_LINES=2000
 CRASHPILOT_ANALYSIS_TIMEOUT=120
 
+# Optional internet capacity test. Passive network throughput is always collected.
+# To enable capacity testing, install speedtest-cli and set this to true.
+# CRASHPILOT_BANDWIDTH_SPEEDTEST_ENABLED=false
+# CRASHPILOT_BANDWIDTH_SPEEDTEST_INTERVAL_SECONDS=21600
+# CRASHPILOT_BANDWIDTH_SPEEDTEST_TIMEOUT_SECONDS=90
+
 # Data storage
 # CRASHPILOT_DATA_DIR=/var/lib/crashpilot  # uncomment for system-wide install
 ENVEOF

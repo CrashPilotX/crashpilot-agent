@@ -492,3 +492,76 @@ class TestNetworkMetrics:
         assert current["tx_bytes_per_second"] == 500_000.0
         assert current["rx_mbps"] == 8.0
         assert current["tx_mbps"] == 4.0
+
+
+    def test_speedtest_capacity_parses_speedtest_cli_json(self, monkeypatch, tmp_path):
+        class Result:
+            returncode = 0
+            stdout = json.dumps({
+                "download": 942_500_000.0,
+                "upload": 118_250_000.0,
+                "ping": 8.3,
+                "server": {"sponsor": "Example ISP", "name": "Chicago", "country": "United States"},
+            })
+            stderr = ""
+
+        settings = SimpleNamespace(
+            data_dir=tmp_path,
+            bandwidth_speedtest_enabled=True,
+            bandwidth_speedtest_interval_seconds=21600,
+            bandwidth_speedtest_timeout_seconds=90,
+        )
+        monkeypatch.setattr("crashpilot.config.get_settings", lambda: settings)
+        monkeypatch.setattr(cloud_push.shutil, "which", lambda name: "/usr/bin/speedtest-cli")
+        monkeypatch.setattr(cloud_push.subprocess, "run", lambda *args, **kwargs: Result())
+
+        result = cloud_push._collect_speedtest_capacity()
+
+        assert result["available"] is True
+        assert result["download_mbps"] == 942.5
+        assert result["upload_mbps"] == 118.25
+        assert result["ping_ms"] == 8.3
+        assert result["server"]["sponsor"] == "Example ISP"
+
+    def test_speedtest_capacity_uses_cache_without_running_cli(self, monkeypatch, tmp_path):
+        cached = {
+            "enabled": True,
+            "available": True,
+            "download_mbps": 100.0,
+            "upload_mbps": 20.0,
+            "tested_at": "2026-07-01T00:00:00+00:00",
+        }
+        (tmp_path / "speedtest_result.json").write_text(
+            json.dumps({"saved_at": 1000.0, "result": cached}),
+            encoding="utf-8",
+        )
+        settings = SimpleNamespace(
+            data_dir=tmp_path,
+            bandwidth_speedtest_enabled=True,
+            bandwidth_speedtest_interval_seconds=21600,
+            bandwidth_speedtest_timeout_seconds=90,
+        )
+        monkeypatch.setattr("crashpilot.config.get_settings", lambda: settings)
+        monkeypatch.setattr(cloud_push.time, "time", lambda: 1010.0)
+        monkeypatch.setattr(cloud_push.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not run")))
+
+        result = cloud_push._collect_speedtest_capacity()
+
+        assert result["download_mbps"] == 100.0
+        assert result["cached"] is True
+        assert result["age_seconds"] == 10.0
+
+    def test_speedtest_capacity_reports_missing_cli_when_enabled(self, monkeypatch, tmp_path):
+        settings = SimpleNamespace(
+            data_dir=tmp_path,
+            bandwidth_speedtest_enabled=True,
+            bandwidth_speedtest_interval_seconds=21600,
+            bandwidth_speedtest_timeout_seconds=90,
+        )
+        monkeypatch.setattr("crashpilot.config.get_settings", lambda: settings)
+        monkeypatch.setattr(cloud_push.shutil, "which", lambda name: None)
+
+        result = cloud_push._collect_speedtest_capacity()
+
+        assert result["available"] is False
+        assert "speedtest-cli" in result["error"]
