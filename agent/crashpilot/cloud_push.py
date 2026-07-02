@@ -517,6 +517,173 @@ def _systemctl_state(unit: str, verb: str) -> str | None:
     return (result.stdout or result.stderr).strip() or None
 
 
+
+
+def _collect_cpu_hardware() -> dict[str, Any]:
+    hardware: dict[str, Any] = {}
+    try:
+        cpuinfo = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
+        first: dict[str, str] = {}
+        for line in cpuinfo.splitlines():
+            if not line.strip():
+                if first:
+                    break
+                continue
+            if ":" in line:
+                key, value = line.split(":", 1)
+                first[key.strip()] = value.strip()
+        flags = first.get("flags", "").split()
+        instruction_flags = [
+            flag for flag in flags
+            if flag in {
+                "sse", "sse2", "sse3", "ssse3", "sse4_1", "sse4_2",
+                "avx", "avx2", "avx512f", "avx512dq", "avx512cd", "avx512bw", "avx512vl",
+                "aes", "fma", "f16c", "sha_ni", "amx_tile", "amx_int8", "amx_bf16",
+            }
+        ]
+        hardware.update({
+            "model_name": first.get("model name") or first.get("Hardware"),
+            "vendor_id": first.get("vendor_id"),
+            "cpu_family": first.get("cpu family"),
+            "model": first.get("model"),
+            "stepping": first.get("stepping"),
+            "microcode": first.get("microcode"),
+            "flags": flags,
+            "instruction_flags": instruction_flags,
+        })
+    except OSError:
+        pass
+
+    if shutil.which("lscpu"):
+        try:
+            result = subprocess.run(["lscpu", "-J"], check=False, capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                payload = json.loads(result.stdout)
+                fields = {
+                    item.get("field", "").rstrip(":"): item.get("data")
+                    for item in payload.get("lscpu", [])
+                    if item.get("field")
+                }
+                hardware.update({
+                    "architecture": fields.get("Architecture"),
+                    "threads_per_core": _safe_int(fields.get("Thread(s) per core")),
+                    "cores_per_socket": _safe_int(fields.get("Core(s) per socket")),
+                    "sockets": _safe_int(fields.get("Socket(s)")),
+                    "cpu_max_mhz": _safe_float(fields.get("CPU max MHz")),
+                    "cpu_min_mhz": _safe_float(fields.get("CPU min MHz")),
+                    "virtualization": fields.get("Virtualization"),
+                    "cache_l1d": fields.get("L1d cache"),
+                    "cache_l1i": fields.get("L1i cache"),
+                    "cache_l2": fields.get("L2 cache"),
+                    "cache_l3": fields.get("L3 cache"),
+                })
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            pass
+    return {key: value for key, value in hardware.items() if value not in (None, "")}
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        return round(float(str(value).strip()), 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_memory_hardware() -> dict[str, Any]:
+    if not shutil.which("dmidecode"):
+        return {"available": False, "error": "dmidecode not installed"}
+    try:
+        result = subprocess.run(["dmidecode", "--type", "memory"], check=False, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"available": False, "error": str(exc)}
+    if result.returncode != 0:
+        return {"available": False, "error": (result.stderr or "dmidecode failed").strip()[:300]}
+
+    modules: list[dict[str, Any]] = []
+    current: dict[str, str] = {}
+    in_device = False
+    for raw in result.stdout.splitlines():
+        line = raw.rstrip()
+        if line.startswith("Memory Device"):
+            if current:
+                modules.append(current)
+            current = {}
+            in_device = True
+            continue
+        if not in_device or ":" not in line:
+            continue
+        key, value = line.strip().split(":", 1)
+        current[key.strip()] = value.strip()
+    if current:
+        modules.append(current)
+
+    parsed = []
+    for module in modules:
+        size = module.get("Size", "")
+        if not size or size in {"No Module Installed", "Unknown"}:
+            continue
+        parsed.append({
+            "locator": module.get("Locator"),
+            "bank_locator": module.get("Bank Locator"),
+            "size": size,
+            "type": module.get("Type"),
+            "speed": module.get("Speed"),
+            "configured_speed": module.get("Configured Memory Speed"),
+            "manufacturer": module.get("Manufacturer"),
+            "part_number": module.get("Part Number"),
+            "serial_number": module.get("Serial Number"),
+            "form_factor": module.get("Form Factor"),
+        })
+    return {"available": True, "modules": parsed[:32], "module_count": len(parsed)}
+
+
+def _collect_block_devices() -> list[dict[str, Any]]:
+    if not shutil.which("lsblk"):
+        return []
+    try:
+        result = subprocess.run(
+            ["lsblk", "-J", "-b", "-o", "NAME,TYPE,SIZE,MODEL,SERIAL,TRAN,MOUNTPOINT,FSTYPE"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+
+    devices: list[dict[str, Any]] = []
+    def walk(items: list[dict[str, Any]], parent: str | None = None) -> None:
+        for item in items:
+            entry = {
+                "name": item.get("name"),
+                "type": item.get("type"),
+                "size_gb": round((float(item.get("size") or 0) / 1024 / 1024 / 1024), 2),
+                "model": item.get("model"),
+                "serial": item.get("serial"),
+                "transport": item.get("tran"),
+                "mountpoint": item.get("mountpoint"),
+                "fstype": item.get("fstype"),
+                "parent": parent,
+            }
+            devices.append({key: value for key, value in entry.items() if value not in (None, "")})
+            children = item.get("children") or []
+            if isinstance(children, list):
+                walk(children, item.get("name"))
+    walk(payload.get("blockdevices", []))
+    return devices[:80]
 def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
     """Small diagnostic payload shown in the dashboard health panel."""
     health: dict[str, Any] = {
@@ -583,9 +750,10 @@ def _build_live_metrics() -> dict[str, Any]:
             "load_5m": round(load_5m, 2),
             "load_15m": round(load_15m, 2),
             "load_pct": min(round((load_1m / cpu_count) * 100, 1), 999.0),
+            "hardware": _collect_cpu_hardware(),
         }
     except OSError:
-        metrics["cpu"] = {"cpu_count": cpu_count}
+        metrics["cpu"] = {"cpu_count": cpu_count, "hardware": _collect_cpu_hardware()}
 
     mem = _read_meminfo()
     if mem:
@@ -601,10 +769,12 @@ def _build_live_metrics() -> dict[str, Any]:
             "used_pct": round((used_kb / total_kb) * 100, 1) if total_kb else 0,
             "swap_used_gb": round((swap_total_kb - swap_free_kb) / 1024 / 1024, 2),
             "swap_total_gb": round(swap_total_kb / 1024 / 1024, 2),
+            "hardware": _collect_memory_hardware(),
         }
 
     disk = _collect_disk_usage()
     if disk:
+        disk["block_devices"] = _collect_block_devices()
         metrics["disk"] = disk
 
     network = _collect_network_usage()
