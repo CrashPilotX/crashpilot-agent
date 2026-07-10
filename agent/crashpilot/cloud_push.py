@@ -758,13 +758,24 @@ def _egress_tracker_path() -> Path | None:
 
 
 def _egress_daily_limit_bytes() -> int:
-    """Return the configured daily limit in bytes, or 0 to disable limiting."""
+    """Return the hard daily limit in bytes, or 0 to disable."""
     try:
         from .config import get_settings
 
-        limit_mb = int(getattr(get_settings(), "egress_daily_limit_mb", 50))
+        limit_mb = int(getattr(get_settings(), "egress_daily_limit_mb", 8))
     except Exception:
-        limit_mb = 50
+        limit_mb = 8
+    return max(limit_mb, 0) * 1024 * 1024
+
+
+def _egress_soft_limit_bytes() -> int:
+    """Return the soft daily limit in bytes (slim mode threshold), or 0 to disable."""
+    try:
+        from .config import get_settings
+
+        limit_mb = int(getattr(get_settings(), "egress_soft_limit_mb", 5))
+    except Exception:
+        limit_mb = 5
     return max(limit_mb, 0) * 1024 * 1024
 
 
@@ -795,17 +806,26 @@ def _save_egress_tracker(path: Path | None, tracker: dict[str, Any]) -> None:
         pass
 
 
-def _check_egress_budget() -> tuple[bool, int, int]:
-    """Return (under_budget, bytes_used_today, limit_bytes).
+def _check_egress_budget() -> tuple[str, int, int]:
+    """Return (mode, bytes_used_today, hard_limit_bytes).
 
-    Returns under_budget=True when limiting is disabled (limit_bytes == 0).
+    mode is one of:
+      "normal" — under soft limit; send full payload including stable sections
+      "slim"   — over soft limit but under hard limit; live metrics only
+      "skip"   — over hard limit; heartbeat skipped entirely
     """
-    limit = _egress_daily_limit_bytes()
-    if limit == 0:
-        return True, 0, 0
+    hard_limit = _egress_daily_limit_bytes()
+    soft_limit = _egress_soft_limit_bytes()
+    if hard_limit == 0 and soft_limit == 0:
+        return "normal", 0, 0
     path = _egress_tracker_path()
     tracker = _load_egress_tracker(path)
-    return tracker["bytes_sent"] < limit, tracker["bytes_sent"], limit
+    used = tracker["bytes_sent"]
+    if hard_limit > 0 and used >= hard_limit:
+        return "skip", used, hard_limit
+    if soft_limit > 0 and used >= soft_limit:
+        return "slim", used, hard_limit
+    return "normal", used, hard_limit
 
 
 def _record_egress(n_bytes: int, kind: str) -> None:
@@ -913,13 +933,21 @@ def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
     try:
         tracker = _load_egress_tracker(_egress_tracker_path())
         limit_bytes = _egress_daily_limit_bytes()
+        soft_limit_bytes = _egress_soft_limit_bytes()
+        bytes_sent = tracker.get("bytes_sent", 0)
         health["egress"] = {
             "date": tracker.get("date"),
-            "bytes_sent": tracker.get("bytes_sent", 0),
+            "bytes_sent": bytes_sent,
+            "soft_limit_bytes": soft_limit_bytes,
             "limit_bytes": limit_bytes,
             "used_pct": (
-                round(tracker.get("bytes_sent", 0) / limit_bytes * 100, 1)
+                round(bytes_sent / limit_bytes * 100, 1)
                 if limit_bytes else None
+            ),
+            "mode": (
+                "skip" if limit_bytes and bytes_sent >= limit_bytes else
+                "slim" if soft_limit_bytes and bytes_sent >= soft_limit_bytes else
+                "normal"
             ),
             "heartbeats_sent": tracker.get("heartbeats_sent", 0),
             "heartbeats_skipped": tracker.get("heartbeats_skipped", 0),
@@ -930,8 +958,14 @@ def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
     return health
 
 
-def _build_live_metrics() -> dict[str, Any]:
-    """Small heartbeat payload for near-live resource load in the dashboard."""
+def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
+    """Small heartbeat payload for near-live resource load in the dashboard.
+
+    When slim=True (egress soft limit reached) only live sections are included
+    (cpu/memory/disk/network/gpu). Stable sections (dmesg, flight_recorder,
+    agent_health) are omitted even if their TTLs have expired; the Supabase
+    JSONB merge ensures the dashboard still sees their last-sent values.
+    """
     metrics: dict[str, Any] = {}
     hw = _collect_hardware_profile()
 
@@ -1024,42 +1058,52 @@ def _build_live_metrics() -> dict[str, Any]:
         metrics["gpu"] = {"nvidia": {"available": False, "gpus": []}}
 
     # ── Stable sections with per-section TTLs ─────────────────────────────────
-    # The Supabase upsert now merges metrics (COALESCE || patch) so absent keys
-    # are preserved from the previous heartbeat.  Each section is only included
-    # in the payload when its TTL has expired, reducing per-heartbeat payload
-    # size from ~20 KB to ~3–5 KB on the vast majority of ticks.
+    # The Supabase upsert merges metrics (COALESCE || patch) so absent keys are
+    # preserved from the previous heartbeat.  Each section is only included when
+    # its TTL has expired, keeping most ticks at ~3–5 KB.
+    # In slim mode (soft egress limit reached) all stable sections are skipped
+    # outright — the dashboard still sees their last-sent values via the merge.
     section_path = _section_ttl_path()
     sent_at = _load_section_ttl(section_path)
     now = time.time()
     updates: dict[str, float] = {}
 
-    # dmesg — collect every tick (uses 5-min file cache), include only when due.
-    dmesg = _collect_live_dmesg()
-    if now - sent_at.get("dmesg", 0) >= _DMESG_SECTION_TTL_SECS:
-        metrics["dmesg"] = dmesg
-        updates["dmesg"] = now
+    if not slim:
+        # dmesg — collect every tick (uses 5-min file cache), include only when due.
+        dmesg = _collect_live_dmesg()
+        if now - sent_at.get("dmesg", 0) >= _DMESG_SECTION_TTL_SECS:
+            metrics["dmesg"] = dmesg
+            updates["dmesg"] = now
 
-    # flight_recorder — record a snapshot every tick for accuracy, include
-    # the window summary only when due.
-    try:
-        from .flight_recorder import record_snapshot, summarize_window
+        # flight_recorder — record a snapshot every tick for accuracy, include
+        # the window summary only when due.
+        try:
+            from .flight_recorder import record_snapshot, summarize_window
 
-        record_snapshot()
-        if now - sent_at.get("flight_recorder", 0) >= _FLIGHT_RECORDER_SECTION_TTL_SECS:
-            metrics["flight_recorder"] = summarize_window(hours=6)
-            updates["flight_recorder"] = now
-    except Exception as exc:
-        if now - sent_at.get("flight_recorder", 0) >= _FLIGHT_RECORDER_SECTION_TTL_SECS:
-            metrics["flight_recorder"] = {"error": str(exc)}
-            updates["flight_recorder"] = now
+            record_snapshot()
+            if now - sent_at.get("flight_recorder", 0) >= _FLIGHT_RECORDER_SECTION_TTL_SECS:
+                metrics["flight_recorder"] = summarize_window(hours=6)
+                updates["flight_recorder"] = now
+        except Exception as exc:
+            if now - sent_at.get("flight_recorder", 0) >= _FLIGHT_RECORDER_SECTION_TTL_SECS:
+                metrics["flight_recorder"] = {"error": str(exc)}
+                updates["flight_recorder"] = now
 
-    # agent_health — version, timer states, tool availability; include when due.
-    if now - sent_at.get("agent_health", 0) >= _AGENT_HEALTH_SECTION_TTL_SECS:
-        metrics["agent_health"] = _build_agent_health(dmesg)
-        updates["agent_health"] = now
+        # agent_health — version, timer states, tool availability; include when due.
+        if now - sent_at.get("agent_health", 0) >= _AGENT_HEALTH_SECTION_TTL_SECS:
+            metrics["agent_health"] = _build_agent_health(dmesg)
+            updates["agent_health"] = now
 
-    if updates:
-        _save_section_ttl(section_path, {**sent_at, **updates})
+        if updates:
+            _save_section_ttl(section_path, {**sent_at, **updates})
+    else:
+        # Still record the flight-recorder snapshot locally even in slim mode so
+        # the window summary stays accurate when we next send it in full.
+        try:
+            from .flight_recorder import record_snapshot
+            record_snapshot()
+        except Exception:
+            pass
 
     return metrics
 
@@ -1105,16 +1149,24 @@ async def push_heartbeat(
 ) -> dict[str, Any]:
     """UPSERT a heartbeat row via the agent_heartbeat RPC."""
     # Check the daily egress budget before building the (potentially large) payload.
-    budget_ok, bytes_used, limit_bytes = _check_egress_budget()
-    if not budget_ok:
+    mode, bytes_used, hard_limit_bytes = _check_egress_budget()
+    if mode == "skip":
         _record_skipped_heartbeat()
         log.warning(
-            "Daily egress budget of %.0f MB exhausted (%.1f MB used today). "
+            "Daily egress hard limit of %.0f MB reached (%.1f MB used today). "
             "Skipping heartbeat until UTC midnight.",
-            limit_bytes / 1024 / 1024,
+            hard_limit_bytes / 1024 / 1024,
             bytes_used / 1024 / 1024,
         )
         return {}
+
+    slim_mode = mode == "slim"
+    if slim_mode:
+        log.debug(
+            "Egress soft limit reached (%.1f MB used today). "
+            "Sending slim heartbeat (live metrics only).",
+            bytes_used / 1024 / 1024,
+        )
 
     url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_heartbeat"
     payload = {
@@ -1122,7 +1174,7 @@ async def push_heartbeat(
         "p_agent_token": agent_token,
         "p_hostname": _hostname(),
         "p_version": _agent_version(),
-        "p_metrics": metrics if metrics is not None else _build_live_metrics(),
+        "p_metrics": metrics if metrics is not None else _build_live_metrics(slim=slim_mode),
     }
     payload_bytes = json.dumps(payload).encode()
 
