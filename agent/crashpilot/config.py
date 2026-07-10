@@ -93,6 +93,11 @@ class Settings(BaseSettings):
     webhook_secret: str = ""
     maintenance_until: str = ""
 
+    # Egress budget — bytes this agent may send to Supabase per UTC day.
+    # Heartbeats are skipped when the limit is hit; crash reports are always sent.
+    # Set to 0 to disable limiting.
+    egress_daily_limit_mb: int = 50
+
     # Optional capacity test. Disabled by default because it uses external
     # speedtest servers and can consume significant bandwidth. Passive RX/TX
     # throughput is always collected from /proc/net/dev.

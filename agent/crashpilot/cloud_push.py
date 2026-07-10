@@ -736,6 +736,89 @@ def _collect_hardware_profile() -> dict[str, Any]:
     return profile
 
 
+# ── Daily egress budget ────────────────────────────────────────────────────────
+
+def _egress_tracker_path() -> Path | None:
+    try:
+        from .config import get_settings
+
+        data_dir = get_settings().data_dir
+        if data_dir is None:
+            return None
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / "daily_egress.json"
+    except Exception:
+        return None
+
+
+def _egress_daily_limit_bytes() -> int:
+    """Return the configured daily limit in bytes, or 0 to disable limiting."""
+    try:
+        from .config import get_settings
+
+        limit_mb = int(getattr(get_settings(), "egress_daily_limit_mb", 50))
+    except Exception:
+        limit_mb = 50
+    return max(limit_mb, 0) * 1024 * 1024
+
+
+def _load_egress_tracker(path: Path | None) -> dict[str, Any]:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if path is not None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("date") == today:
+                return data
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+    return {
+        "date": today,
+        "bytes_sent": 0,
+        "heartbeats_sent": 0,
+        "heartbeats_skipped": 0,
+        "reports_sent": 0,
+    }
+
+
+def _save_egress_tracker(path: Path | None, tracker: dict[str, Any]) -> None:
+    if path is None:
+        return
+    try:
+        path.write_text(json.dumps(tracker), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _check_egress_budget() -> tuple[bool, int, int]:
+    """Return (under_budget, bytes_used_today, limit_bytes).
+
+    Returns under_budget=True when limiting is disabled (limit_bytes == 0).
+    """
+    limit = _egress_daily_limit_bytes()
+    if limit == 0:
+        return True, 0, 0
+    path = _egress_tracker_path()
+    tracker = _load_egress_tracker(path)
+    return tracker["bytes_sent"] < limit, tracker["bytes_sent"], limit
+
+
+def _record_egress(n_bytes: int, kind: str) -> None:
+    """Accumulate sent bytes in today's egress tracker file."""
+    path = _egress_tracker_path()
+    tracker = _load_egress_tracker(path)
+    tracker["bytes_sent"] = tracker.get("bytes_sent", 0) + n_bytes
+    counter_key = f"{kind}s_sent"
+    tracker[counter_key] = tracker.get(counter_key, 0) + 1
+    _save_egress_tracker(path, tracker)
+
+
+def _record_skipped_heartbeat() -> None:
+    path = _egress_tracker_path()
+    tracker = _load_egress_tracker(path)
+    tracker["heartbeats_skipped"] = tracker.get("heartbeats_skipped", 0) + 1
+    _save_egress_tracker(path, tracker)
+
+
 def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
     """Small diagnostic payload shown in the dashboard health panel."""
     health: dict[str, Any] = {
@@ -786,6 +869,23 @@ def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
         health["webhooks"] = webhook_delivery_status()
     except Exception as exc:
         health["config_error"] = str(exc)
+    try:
+        tracker = _load_egress_tracker(_egress_tracker_path())
+        limit_bytes = _egress_daily_limit_bytes()
+        health["egress"] = {
+            "date": tracker.get("date"),
+            "bytes_sent": tracker.get("bytes_sent", 0),
+            "limit_bytes": limit_bytes,
+            "used_pct": (
+                round(tracker.get("bytes_sent", 0) / limit_bytes * 100, 1)
+                if limit_bytes else None
+            ),
+            "heartbeats_sent": tracker.get("heartbeats_sent", 0),
+            "heartbeats_skipped": tracker.get("heartbeats_skipped", 0),
+            "reports_sent": tracker.get("reports_sent", 0),
+        }
+    except Exception:
+        pass
     return health
 
 
@@ -935,6 +1035,18 @@ async def push_heartbeat(
     metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """UPSERT a heartbeat row via the agent_heartbeat RPC."""
+    # Check the daily egress budget before building the (potentially large) payload.
+    budget_ok, bytes_used, limit_bytes = _check_egress_budget()
+    if not budget_ok:
+        _record_skipped_heartbeat()
+        log.warning(
+            "Daily egress budget of %.0f MB exhausted (%.1f MB used today). "
+            "Skipping heartbeat until UTC midnight.",
+            limit_bytes / 1024 / 1024,
+            bytes_used / 1024 / 1024,
+        )
+        return {}
+
     url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_heartbeat"
     payload = {
         "p_system_id": system_id,
@@ -943,12 +1055,15 @@ async def push_heartbeat(
         "p_version": _agent_version(),
         "p_metrics": metrics if metrics is not None else _build_live_metrics(),
     }
+    payload_bytes = json.dumps(payload).encode()
+
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.post(url, headers=_headers(anon_key), json=payload)
+        resp = await client.post(url, headers=_headers(anon_key), content=payload_bytes)
         if resp.status_code == 404 and "p_metrics" in resp.text:
             # Existing deployments may not have the metrics-enabled RPC yet.
             legacy_payload = {k: v for k, v in payload.items() if k != "p_metrics"}
             resp = await client.post(url, headers=_headers(anon_key), json=legacy_payload)
+            payload_bytes = json.dumps(legacy_payload).encode()
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -976,6 +1091,8 @@ async def push_heartbeat(
         from .storage.store import set_meta
 
         set_meta("maintenance_until", response_data.get("maintenance_until") or "")
+
+    _record_egress(len(payload_bytes) + len(resp.content) + len(status_resp.content), "heartbeat")
     log.debug("Heartbeat sent for system %s", system_id)
     return response_data
 
@@ -1046,17 +1163,17 @@ async def push_report(
         cloud_report["crash_type"] = analysis["crash_type"]
 
     url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_push_report"
+    rpc_payload = {
+        "p_system_id": system_id,
+        "p_agent_token": agent_token,
+        "p_report": cloud_report,
+    }
+    rpc_bytes = json.dumps(rpc_payload).encode()
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-        resp = await client.post(
-            url,
-            headers=_headers(anon_key),
-            json={
-                "p_system_id": system_id,
-                "p_agent_token": agent_token,
-                "p_report": cloud_report,
-            },
-        )
+        resp = await client.post(url, headers=_headers(anon_key), content=rpc_bytes)
         resp.raise_for_status()
+
+    _record_egress(len(rpc_bytes) + len(resp.content), "report")
 
     report_id = report.get("id")
     result = resp.json()
