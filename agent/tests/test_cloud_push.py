@@ -276,6 +276,29 @@ class TestPushHeartbeat:
         assert health["push_config"]["configured"] is True
         assert health["dmesg"]["critical_count"] == 2
 
+    def test_remote_update_request_starts_update_service_once(self, monkeypatch):
+        """A dashboard update request should start the verified updater service once."""
+        meta: dict[str, str] = {}
+        calls: list[list[str]] = []
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        monkeypatch.setattr(cloud_push.shutil, "which", lambda name: "/usr/bin/systemctl" if name == "systemctl" else None)
+        monkeypatch.setattr(cloud_push.subprocess, "run", lambda args, **kwargs: calls.append(args) or Result())
+        monkeypatch.setattr("crashpilot.storage.store.get_meta", lambda key: meta.get(key))
+        monkeypatch.setattr("crashpilot.storage.store.set_meta", lambda key, value: meta.__setitem__(key, value))
+
+        status = {"agent_update_requested_at": "2026-07-10T12:00:00+00:00"}
+        cloud_push._maybe_start_remote_update(status)
+        cloud_push._maybe_start_remote_update(status)
+
+        assert calls == [["systemctl", "start", "--no-block", "crashpilot-update.service"]]
+        assert meta["agent_update_requested_at"] == "2026-07-10T12:00:00+00:00"
+
+
     def test_collect_disk_usage_reports_root_and_filesystems(self, monkeypatch):
         """Heartbeat metrics include root disk pressure for low-space alerts."""
 

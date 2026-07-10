@@ -1139,6 +1139,41 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
     return metrics
 
 
+def _maybe_start_remote_update(status: dict[str, Any]) -> None:
+    """Start the verified updater when Supabase requests a remote agent update."""
+    requested_at = status.get("agent_update_requested_at")
+    if not requested_at:
+        return
+
+    try:
+        from .storage.store import get_meta, set_meta
+
+        last_seen = get_meta("agent_update_requested_at")
+        if last_seen == requested_at:
+            return
+
+        if shutil.which("systemctl"):
+            result = subprocess.run(
+                ["systemctl", "start", "--no-block", "crashpilot-update.service"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "systemctl start failed").strip()
+                log.warning("Remote CrashPilot update request could not start updater: %s", detail)
+                return
+        else:
+            log.warning("Remote CrashPilot update requested, but systemctl is unavailable")
+            return
+
+        set_meta("agent_update_requested_at", requested_at)
+        log.info("Remote CrashPilot update requested at %s; updater service started", requested_at)
+    except Exception as exc:
+        log.warning("Remote CrashPilot update request failed: %s", exc)
+
+
 def _explain_http_error(exc: httpx.HTTPStatusError) -> str:
     """Turn a Supabase REST error into an actionable message.
 
@@ -1245,6 +1280,7 @@ async def push_heartbeat(
         from .storage.store import set_meta
 
         set_meta("maintenance_until", response_data.get("maintenance_until") or "")
+        _maybe_start_remote_update(response_data)
 
     _record_egress(
         len(payload_bytes) + len(resp.content) + len(status_resp.content),

@@ -3,8 +3,8 @@ Description=CrashPilotX Daily Agent Update Check
 
 [Timer]
 OnBootSec=10m
-OnCalendar=daily
-RandomizedDelaySec=2h
+OnCalendar=hourly
+RandomizedDelaySec=10m
 Persistent=true
 Unit=crashpilot-update.service
 
