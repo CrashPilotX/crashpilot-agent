@@ -30,6 +30,12 @@ _LIVE_DMESG_TTL_SECONDS = 300
 _LIVE_DMESG_TAIL_CHARS = 2000
 _LIVE_DMESG_MAX_CRITICAL = 20
 _HARDWARE_PROFILE_TTL_SECONDS = 86400  # 24 h — hardware almost never changes
+
+# Per-section send intervals for stable heartbeat sections.
+# Live metrics (cpu/memory/disk/gpu/network) are always included.
+_DMESG_SECTION_TTL_SECS         = 300   # every 5 min — matches dmesg file cache
+_FLIGHT_RECORDER_SECTION_TTL_SECS = 600  # every 10 min — 6-hour window summary
+_AGENT_HEALTH_SECTION_TTL_SECS  = 1800  # every 30 min — version/timer states
 _LIVE_DMESG_PATTERN = re.compile(
     "|".join([
         r"Kernel panic",
@@ -819,6 +825,41 @@ def _record_skipped_heartbeat() -> None:
     _save_egress_tracker(path, tracker)
 
 
+# ── Section TTL tracker ────────────────────────────────────────────────────────
+
+def _section_ttl_path() -> Path | None:
+    try:
+        from .config import get_settings
+
+        data_dir = get_settings().data_dir
+        if data_dir is None:
+            return None
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / "section_ttl.json"
+    except Exception:
+        return None
+
+
+def _load_section_ttl(path: Path | None) -> dict[str, float]:
+    if path is not None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {k: float(v) for k, v in data.items() if isinstance(v, (int, float))}
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+    return {}
+
+
+def _save_section_ttl(path: Path | None, ttl: dict[str, float]) -> None:
+    if path is None:
+        return
+    try:
+        path.write_text(json.dumps(ttl), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
     """Small diagnostic payload shown in the dashboard health panel."""
     health: dict[str, Any] = {
@@ -982,15 +1023,43 @@ def _build_live_metrics() -> dict[str, Any]:
     else:
         metrics["gpu"] = {"nvidia": {"available": False, "gpus": []}}
 
-    metrics["dmesg"] = _collect_live_dmesg()
+    # ── Stable sections with per-section TTLs ─────────────────────────────────
+    # The Supabase upsert now merges metrics (COALESCE || patch) so absent keys
+    # are preserved from the previous heartbeat.  Each section is only included
+    # in the payload when its TTL has expired, reducing per-heartbeat payload
+    # size from ~20 KB to ~3–5 KB on the vast majority of ticks.
+    section_path = _section_ttl_path()
+    sent_at = _load_section_ttl(section_path)
+    now = time.time()
+    updates: dict[str, float] = {}
+
+    # dmesg — collect every tick (uses 5-min file cache), include only when due.
+    dmesg = _collect_live_dmesg()
+    if now - sent_at.get("dmesg", 0) >= _DMESG_SECTION_TTL_SECS:
+        metrics["dmesg"] = dmesg
+        updates["dmesg"] = now
+
+    # flight_recorder — record a snapshot every tick for accuracy, include
+    # the window summary only when due.
     try:
         from .flight_recorder import record_snapshot, summarize_window
 
         record_snapshot()
-        metrics["flight_recorder"] = summarize_window(hours=6)
+        if now - sent_at.get("flight_recorder", 0) >= _FLIGHT_RECORDER_SECTION_TTL_SECS:
+            metrics["flight_recorder"] = summarize_window(hours=6)
+            updates["flight_recorder"] = now
     except Exception as exc:
-        metrics["flight_recorder"] = {"error": str(exc)}
-    metrics["agent_health"] = _build_agent_health(metrics["dmesg"])
+        if now - sent_at.get("flight_recorder", 0) >= _FLIGHT_RECORDER_SECTION_TTL_SECS:
+            metrics["flight_recorder"] = {"error": str(exc)}
+            updates["flight_recorder"] = now
+
+    # agent_health — version, timer states, tool availability; include when due.
+    if now - sent_at.get("agent_health", 0) >= _AGENT_HEALTH_SECTION_TTL_SECS:
+        metrics["agent_health"] = _build_agent_health(dmesg)
+        updates["agent_health"] = now
+
+    if updates:
+        _save_section_ttl(section_path, {**sent_at, **updates})
 
     return metrics
 
