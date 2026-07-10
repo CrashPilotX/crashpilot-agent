@@ -812,7 +812,7 @@ def _check_egress_budget() -> tuple[str, int, int]:
     mode is one of:
       "normal" — under soft limit; send full payload including stable sections
       "slim"   — over soft limit but under hard limit; live metrics only
-      "skip"   — over hard limit; heartbeat skipped entirely
+      "skip"   — over hard limit; send a tiny status-only heartbeat
     """
     hard_limit = _egress_daily_limit_bytes()
     soft_limit = _egress_soft_limit_bytes()
@@ -828,12 +828,43 @@ def _check_egress_budget() -> tuple[str, int, int]:
     return "normal", used, hard_limit
 
 
+def _egress_status(*, mode: str, bytes_used: int | None = None, hard_limit_bytes: int | None = None) -> dict[str, Any]:
+    """Return the small egress status block shown in agent health."""
+    tracker = _load_egress_tracker(_egress_tracker_path())
+    limit_bytes = _egress_daily_limit_bytes() if hard_limit_bytes is None else hard_limit_bytes
+    soft_limit_bytes = _egress_soft_limit_bytes()
+    sent = tracker.get("bytes_sent", 0) if bytes_used is None else bytes_used
+    status: dict[str, Any] = {
+        "date": tracker.get("date"),
+        "bytes_sent": sent,
+        "soft_limit_bytes": soft_limit_bytes,
+        "limit_bytes": limit_bytes,
+        "used_pct": round(sent / limit_bytes * 100, 1) if limit_bytes else None,
+        "mode": mode,
+        "heartbeats_sent": tracker.get("heartbeats_sent", 0),
+        "heartbeats_minimal": tracker.get("heartbeats_minimal", 0),
+        "heartbeats_skipped": tracker.get("heartbeats_skipped", 0),
+        "reports_sent": tracker.get("reports_sent", 0),
+    }
+    if mode == "minimal":
+        status["hard_limit_exceeded"] = True
+        status["message"] = (
+            "Daily egress budget is exhausted; sending minimal heartbeat so "
+            "CrashPilot does not mark this system offline."
+        )
+    return status
+
+
 def _record_egress(n_bytes: int, kind: str) -> None:
     """Accumulate sent bytes in today's egress tracker file."""
     path = _egress_tracker_path()
     tracker = _load_egress_tracker(path)
     tracker["bytes_sent"] = tracker.get("bytes_sent", 0) + n_bytes
-    counter_key = f"{kind}s_sent"
+    counter_key = {
+        "heartbeat": "heartbeats_sent",
+        "heartbeat_minimal": "heartbeats_minimal",
+        "report": "reports_sent",
+    }.get(kind, f"{kind}s_sent")
     tracker[counter_key] = tracker.get(counter_key, 0) + 1
     _save_egress_tracker(path, tracker)
 
@@ -843,6 +874,22 @@ def _record_skipped_heartbeat() -> None:
     tracker = _load_egress_tracker(path)
     tracker["heartbeats_skipped"] = tracker.get("heartbeats_skipped", 0) + 1
     _save_egress_tracker(path, tracker)
+
+
+def _build_minimal_heartbeat_metrics(bytes_used: int, hard_limit_bytes: int) -> dict[str, Any]:
+    """Tiny heartbeat payload used after the daily egress hard limit is reached."""
+    return {
+        "agent_health": {
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "version": _agent_version(),
+            "hostname": _hostname(),
+            "egress": _egress_status(
+                mode="minimal",
+                bytes_used=bytes_used,
+                hard_limit_bytes=hard_limit_bytes,
+            ),
+        }
+    }
 
 
 # ── Section TTL tracker ────────────────────────────────────────────────────────
@@ -931,28 +978,12 @@ def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         health["config_error"] = str(exc)
     try:
-        tracker = _load_egress_tracker(_egress_tracker_path())
-        limit_bytes = _egress_daily_limit_bytes()
-        soft_limit_bytes = _egress_soft_limit_bytes()
-        bytes_sent = tracker.get("bytes_sent", 0)
-        health["egress"] = {
-            "date": tracker.get("date"),
-            "bytes_sent": bytes_sent,
-            "soft_limit_bytes": soft_limit_bytes,
-            "limit_bytes": limit_bytes,
-            "used_pct": (
-                round(bytes_sent / limit_bytes * 100, 1)
-                if limit_bytes else None
-            ),
-            "mode": (
-                "skip" if limit_bytes and bytes_sent >= limit_bytes else
-                "slim" if soft_limit_bytes and bytes_sent >= soft_limit_bytes else
-                "normal"
-            ),
-            "heartbeats_sent": tracker.get("heartbeats_sent", 0),
-            "heartbeats_skipped": tracker.get("heartbeats_skipped", 0),
-            "reports_sent": tracker.get("reports_sent", 0),
-        }
+        mode, bytes_sent, limit_bytes = _check_egress_budget()
+        health["egress"] = _egress_status(
+            mode="minimal" if mode == "skip" else mode,
+            bytes_used=bytes_sent,
+            hard_limit_bytes=limit_bytes,
+        )
     except Exception:
         pass
     return health
@@ -1150,18 +1181,16 @@ async def push_heartbeat(
     """UPSERT a heartbeat row via the agent_heartbeat RPC."""
     # Check the daily egress budget before building the (potentially large) payload.
     mode, bytes_used, hard_limit_bytes = _check_egress_budget()
-    if mode == "skip":
-        _record_skipped_heartbeat()
+    minimal_mode = mode == "skip"
+    slim_mode = mode == "slim"
+    if minimal_mode:
         log.warning(
             "Daily egress hard limit of %.0f MB reached (%.1f MB used today). "
-            "Skipping heartbeat until UTC midnight.",
+            "Sending minimal heartbeat until UTC midnight.",
             hard_limit_bytes / 1024 / 1024,
             bytes_used / 1024 / 1024,
         )
-        return {}
-
-    slim_mode = mode == "slim"
-    if slim_mode:
+    elif slim_mode:
         log.debug(
             "Egress soft limit reached (%.1f MB used today). "
             "Sending slim heartbeat (live metrics only).",
@@ -1174,7 +1203,11 @@ async def push_heartbeat(
         "p_agent_token": agent_token,
         "p_hostname": _hostname(),
         "p_version": _agent_version(),
-        "p_metrics": metrics if metrics is not None else _build_live_metrics(slim=slim_mode),
+        "p_metrics": (
+            metrics if metrics is not None else
+            _build_minimal_heartbeat_metrics(bytes_used, hard_limit_bytes) if minimal_mode else
+            _build_live_metrics(slim=slim_mode)
+        ),
     }
     payload_bytes = json.dumps(payload).encode()
 
@@ -1213,7 +1246,10 @@ async def push_heartbeat(
 
         set_meta("maintenance_until", response_data.get("maintenance_until") or "")
 
-    _record_egress(len(payload_bytes) + len(resp.content) + len(status_resp.content), "heartbeat")
+    _record_egress(
+        len(payload_bytes) + len(resp.content) + len(status_resp.content),
+        "heartbeat_minimal" if minimal_mode else "heartbeat",
+    )
     log.debug("Heartbeat sent for system %s", system_id)
     return response_data
 

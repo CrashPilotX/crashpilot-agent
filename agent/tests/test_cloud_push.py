@@ -83,6 +83,42 @@ class TestPushHeartbeat:
             payload = json.loads(route.calls[0].request.content)
             assert payload["p_metrics"] == metrics
 
+    async def test_hard_egress_limit_sends_minimal_heartbeat(self, monkeypatch, tmp_path):
+        """Hard egress limit must not make an otherwise healthy system appear offline."""
+        tracker = tmp_path / "daily_egress.json"
+        today = cloud_push.datetime.now(cloud_push.timezone.utc).strftime("%Y-%m-%d")
+        tracker.write_text(
+            json.dumps({
+                "date": today,
+                "bytes_sent": 3 * 1024 * 1024,
+                "heartbeats_sent": 12,
+                "heartbeats_skipped": 0,
+                "reports_sent": 0,
+            }),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(cloud_push, "_egress_tracker_path", lambda: tracker)
+        monkeypatch.setattr(cloud_push, "_egress_daily_limit_bytes", lambda: 2 * 1024 * 1024)
+        monkeypatch.setattr(cloud_push, "_egress_soft_limit_bytes", lambda: 1 * 1024 * 1024)
+        monkeypatch.setattr(cloud_push, "_agent_version", lambda: "0.2.0-test")
+        monkeypatch.setattr(cloud_push, "_hostname", lambda: "server1")
+        monkeypatch.setattr(cloud_push, "_build_live_metrics", lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not build full metrics")))
+
+        with respx.mock:
+            route = respx.post(HB_URL).mock(return_value=httpx.Response(200))
+            mock_legacy_status()
+            await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
+
+        assert route.called
+        payload = json.loads(route.calls[0].request.content)
+        metrics = payload["p_metrics"]
+        assert set(metrics) == {"agent_health"}
+        assert metrics["agent_health"]["egress"]["mode"] == "minimal"
+        assert metrics["agent_health"]["egress"]["hard_limit_exceeded"] is True
+        updated = json.loads(tracker.read_text(encoding="utf-8"))
+        assert updated["heartbeats_minimal"] == 1
+        assert updated.get("heartbeats_skipped", 0) == 0
+
     async def test_syncs_maintenance_status(self, monkeypatch):
         saved: list[tuple[str, str]] = []
         monkeypatch.setattr(
