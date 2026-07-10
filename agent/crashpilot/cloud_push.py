@@ -718,9 +718,9 @@ def _collect_hardware_profile() -> dict[str, Any]:
         try:
             cache = json.loads(cache_path.read_text(encoding="utf-8"))
             if time.time() - float(cache.get("saved_at", 0)) <= _HARDWARE_PROFILE_TTL_SECONDS:
-                profile = cache.get("profile")
-                if isinstance(profile, dict):
-                    return profile
+                cached_profile = cache.get("profile")
+                if isinstance(cached_profile, dict):
+                    return cached_profile
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             pass
 
