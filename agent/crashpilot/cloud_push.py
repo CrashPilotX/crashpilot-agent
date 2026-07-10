@@ -36,6 +36,7 @@ _HARDWARE_PROFILE_TTL_SECONDS = 86400  # 24 h — hardware almost never changes
 _DMESG_SECTION_TTL_SECS         = 300   # every 5 min — matches dmesg file cache
 _FLIGHT_RECORDER_SECTION_TTL_SECS = 600  # every 10 min — 6-hour window summary
 _AGENT_HEALTH_SECTION_TTL_SECS  = 1800  # every 30 min — version/timer states
+_HARDWARE_SECTION_TTL_SECS      = 86400 # every 24 h — static CPU/memory/disk profile
 _LIVE_DMESG_PATTERN = re.compile(
     "|".join([
         r"Kernel panic",
@@ -892,6 +893,18 @@ def _build_minimal_heartbeat_metrics(bytes_used: int, hard_limit_bytes: int) -> 
     }
 
 
+def _build_hardware_profile_metrics() -> dict[str, Any]:
+    """Static hardware profile sent on a slow cadence, not every heartbeat."""
+    hw = _collect_hardware_profile()
+    return {
+        "cpu": {"hardware": hw.get("cpu", {})},
+        "memory": {"hardware": hw.get("memory", {})},
+        "disk": {"block_devices": hw.get("block_devices", [])},
+        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "refresh_interval_seconds": _HARDWARE_SECTION_TTL_SECS,
+    }
+
+
 # ── Section TTL tracker ────────────────────────────────────────────────────────
 
 def _section_ttl_path() -> Path | None:
@@ -992,13 +1005,11 @@ def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
 def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
     """Small heartbeat payload for near-live resource load in the dashboard.
 
-    When slim=True (egress soft limit reached) only live sections are included
-    (cpu/memory/disk/network/gpu). Stable sections (dmesg, flight_recorder,
-    agent_health) are omitted even if their TTLs have expired; the Supabase
-    JSONB merge ensures the dashboard still sees their last-sent values.
+    When slim=True (egress soft limit reached) only compact live values are
+    included. Static hardware/profile data is sent separately on a slow cadence
+    and preserved in Supabase by JSONB merge.
     """
     metrics: dict[str, Any] = {}
-    hw = _collect_hardware_profile()
 
     cpu_count = os.cpu_count() or 1
     try:
@@ -1009,10 +1020,9 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
             "load_5m": round(load_5m, 2),
             "load_15m": round(load_15m, 2),
             "load_pct": min(round((load_1m / cpu_count) * 100, 1), 999.0),
-            "hardware": hw["cpu"],
         }
     except OSError:
-        metrics["cpu"] = {"cpu_count": cpu_count, "hardware": hw["cpu"]}
+        metrics["cpu"] = {"cpu_count": cpu_count}
 
     mem = _read_meminfo()
     if mem:
@@ -1028,16 +1038,18 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
             "used_pct": round((used_kb / total_kb) * 100, 1) if total_kb else 0,
             "swap_used_gb": round((swap_total_kb - swap_free_kb) / 1024 / 1024, 2),
             "swap_total_gb": round(swap_total_kb / 1024 / 1024, 2),
-            "hardware": hw["memory"],
         }
 
     disk = _collect_disk_usage()
     if disk:
-        disk["block_devices"] = hw["block_devices"]
+        if slim:
+            disk = {key: value for key, value in disk.items() if key != "filesystems"}
         metrics["disk"] = disk
 
     network = _collect_network_usage()
     if network:
+        if slim:
+            network = {key: value for key, value in network.items() if key != "speedtest"}
         metrics["network"] = network
 
     if shutil.which("nvidia-smi"):
@@ -1100,6 +1112,10 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
     updates: dict[str, float] = {}
 
     if not slim:
+        if now - sent_at.get("hardware_profile", 0) >= _HARDWARE_SECTION_TTL_SECS:
+            metrics["hardware_profile"] = _build_hardware_profile_metrics()
+            updates["hardware_profile"] = now
+
         # dmesg — collect every tick (uses 5-min file cache), include only when due.
         dmesg = _collect_live_dmesg()
         if now - sent_at.get("dmesg", 0) >= _DMESG_SECTION_TTL_SECS:

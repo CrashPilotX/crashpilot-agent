@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -17,6 +19,7 @@ from .config import get_settings
 BUNDLE_URL = "https://crashpilotx.com/crashpilot-agent.tar.gz"
 CHECKSUM_URL = f"{BUNDLE_URL}.sha256"
 _SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
+SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
 
 
 def _download(url: str) -> bytes:
@@ -44,6 +47,51 @@ def _safe_extract(bundle_path: Path, destination: Path) -> None:
         archive.extractall(destination)
 
 
+def _refresh_systemd_units(bundle_root: Path) -> dict[str, Any]:
+    """Best-effort refresh of installed systemd units from the verified bundle."""
+    systemd_dir = bundle_root / "systemd"
+    unit_dir = SYSTEMD_UNIT_DIR
+    unit_names = [
+        "crashpilot-heartbeat.service",
+        "crashpilot-heartbeat.timer",
+        "crashpilot-update.service",
+        "crashpilot-update.timer",
+        "crashpilot-snapshot.service",
+        "crashpilot-snapshot.timer",
+    ]
+    result: dict[str, Any] = {"refreshed": False, "units": [], "error": None}
+    if not systemd_dir.is_dir() or not unit_dir.is_dir() or not os.access(unit_dir, os.W_OK):
+        return result
+
+    copied: list[str] = []
+    try:
+        for name in unit_names:
+            src = systemd_dir / name
+            if src.is_file():
+                shutil.copy2(src, unit_dir / name)
+                copied.append(name)
+        if not copied:
+            return result
+        subprocess.run(["systemctl", "daemon-reload"], check=False, capture_output=True, text=True, timeout=30)
+        for timer in [
+            "crashpilot-heartbeat.timer",
+            "crashpilot-update.timer",
+            "crashpilot-snapshot.timer",
+        ]:
+            if timer in copied:
+                subprocess.run(
+                    ["systemctl", "enable", "--now", timer],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+        result.update({"refreshed": True, "units": copied})
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
 def install_latest(
     *,
     force: bool = False,
@@ -67,13 +115,15 @@ def install_latest(
     if actual != expected:
         raise RuntimeError("agent bundle checksum verification failed")
 
+    systemd_result: dict[str, Any] = {"refreshed": False, "units": [], "error": None}
     with tempfile.TemporaryDirectory(prefix="crashpilot-update-") as temp:
         temp_dir = Path(temp)
         bundle_path = temp_dir / "crashpilot-agent.tar.gz"
         bundle_path.write_bytes(bundle)
         _safe_extract(bundle_path, temp_dir)
 
-        agent_dir = temp_dir / "CrashPilot" / "agent"
+        bundle_root = temp_dir / "CrashPilot"
+        agent_dir = bundle_root / "agent"
         if not (agent_dir / "pyproject.toml").is_file():
             raise RuntimeError("agent bundle is missing agent/pyproject.toml")
 
@@ -97,5 +147,7 @@ def install_latest(
             detail = (result.stderr or result.stdout).strip()
             raise RuntimeError(f"agent update install failed: {detail}")
 
+        systemd_result = _refresh_systemd_units(bundle_root)
+
     state_path.write_text(expected + "\n", encoding="utf-8")
-    return {"updated": True, "checksum": expected}
+    return {"updated": True, "checksum": expected, "systemd": systemd_result}

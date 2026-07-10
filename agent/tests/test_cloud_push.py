@@ -234,6 +234,100 @@ class TestPushHeartbeat:
         assert first["refresh_interval_seconds"] == 300
         assert first["critical_count"] == 1
 
+    def test_live_metrics_send_static_hardware_only_on_profile_ttl(self, monkeypatch, tmp_path):
+        """Static hardware should not bloat every one-minute heartbeat."""
+        ttl_path = tmp_path / "section_ttl.json"
+        now = cloud_push.time.time()
+        ttl_path.write_text(json.dumps({
+            "hardware_profile": now,
+            "dmesg": now,
+            "flight_recorder": now,
+            "agent_health": now,
+        }))
+
+        monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: ttl_path)
+        monkeypatch.setattr(cloud_push.os, "getloadavg", lambda: (0.5, 0.4, 0.3))
+        monkeypatch.setattr(cloud_push, "_read_meminfo", lambda: {
+            "MemTotal": 1024 * 1024,
+            "MemAvailable": 512 * 1024,
+            "SwapTotal": 0,
+            "SwapFree": 0,
+        })
+        monkeypatch.setattr(cloud_push, "_collect_disk_usage", lambda: {
+            "primary": {"used_pct": 10},
+            "filesystems": [{"mountpoint": "/", "used_pct": 10}],
+        })
+        monkeypatch.setattr(cloud_push, "_collect_network_usage", lambda: {"rx_mbps": 1.2, "tx_mbps": 0.3})
+        monkeypatch.setattr(cloud_push.shutil, "which", lambda name: None)
+        monkeypatch.setattr(
+            cloud_push,
+            "_collect_hardware_profile",
+            lambda: (_ for _ in ()).throw(AssertionError("hardware should stay on its TTL")),
+        )
+
+        metrics = cloud_push._build_live_metrics()
+
+        assert "hardware_profile" not in metrics
+        assert "hardware" not in metrics["cpu"]
+        assert "hardware" not in metrics["memory"]
+        assert "block_devices" not in metrics["disk"]
+
+    def test_live_metrics_include_hardware_profile_when_due(self, monkeypatch, tmp_path):
+        """Hardware profile is still available, just on a slow cadence."""
+        ttl_path = tmp_path / "section_ttl.json"
+        ttl_path.write_text(json.dumps({
+            "dmesg": cloud_push.time.time(),
+            "flight_recorder": cloud_push.time.time(),
+            "agent_health": cloud_push.time.time(),
+        }))
+
+        monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: ttl_path)
+        monkeypatch.setattr(cloud_push.os, "getloadavg", lambda: (0.5, 0.4, 0.3))
+        monkeypatch.setattr(cloud_push, "_read_meminfo", lambda: {})
+        monkeypatch.setattr(cloud_push, "_collect_disk_usage", lambda: {})
+        monkeypatch.setattr(cloud_push, "_collect_network_usage", lambda: {})
+        monkeypatch.setattr(cloud_push.shutil, "which", lambda name: None)
+        monkeypatch.setattr(cloud_push, "_collect_hardware_profile", lambda: {
+            "cpu": {"model": "test-cpu"},
+            "memory": {"slots": []},
+            "block_devices": [{"name": "sda"}],
+        })
+
+        metrics = cloud_push._build_live_metrics()
+
+        assert metrics["hardware_profile"]["cpu"]["hardware"]["model"] == "test-cpu"
+        assert metrics["hardware_profile"]["disk"]["block_devices"] == [{"name": "sda"}]
+        saved = json.loads(ttl_path.read_text())
+        assert saved["hardware_profile"] > 0
+
+    def test_slim_live_metrics_trim_verbose_detail(self, monkeypatch, tmp_path):
+        """Soft-cap slim mode keeps live values but drops bulky detail."""
+        monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: tmp_path / "section_ttl.json")
+        monkeypatch.setattr(cloud_push.os, "getloadavg", lambda: (0.5, 0.4, 0.3))
+        monkeypatch.setattr(cloud_push, "_read_meminfo", lambda: {})
+        monkeypatch.setattr(cloud_push, "_collect_disk_usage", lambda: {
+            "primary": {"used_pct": 10},
+            "filesystems": [{"mountpoint": "/", "used_pct": 10}],
+        })
+        monkeypatch.setattr(cloud_push, "_collect_network_usage", lambda: {
+            "rx_mbps": 1.2,
+            "tx_mbps": 0.3,
+            "speedtest": {"download_mbps": 100},
+        })
+        monkeypatch.setattr(cloud_push.shutil, "which", lambda name: None)
+        monkeypatch.setattr(
+            cloud_push,
+            "_collect_hardware_profile",
+            lambda: (_ for _ in ()).throw(AssertionError("slim should not collect hardware")),
+        )
+
+        metrics = cloud_push._build_live_metrics(slim=True)
+
+        assert "hardware_profile" not in metrics
+        assert "filesystems" not in metrics["disk"]
+        assert "speedtest" not in metrics["network"]
+        assert metrics["network"]["rx_mbps"] == 1.2
+
     def test_agent_health_payload_reports_timer_tools_and_config(self, monkeypatch):
         """Heartbeat metrics include agent health diagnostics for the dashboard."""
         from crashpilot import config

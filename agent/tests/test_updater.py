@@ -22,6 +22,22 @@ def _bundle_bytes(member_name: str = "CrashPilot/agent/pyproject.toml") -> bytes
     return output.getvalue()
 
 
+def _bundle_with_systemd() -> bytes:
+    output = io.BytesIO()
+    members = {
+        "CrashPilot/agent/pyproject.toml": b"[project]\nname='crashpilot'\nversion='0.1.0'\n",
+        "CrashPilot/systemd/crashpilot-update.timer": b"[Timer]\nOnCalendar=hourly\n",
+        "CrashPilot/systemd/crashpilot-update.service": b"[Service]\nExecStart=/opt/crashpilot/venv/bin/crashpilot update --quiet\n",
+        "CrashPilot/systemd/crashpilot-heartbeat.timer": b"[Timer]\nOnUnitActiveSec=60s\n",
+    }
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        for name, payload in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    return output.getvalue()
+
+
 def test_unchanged_bundle_skips_reinstall(tmp_path, monkeypatch):
     bundle = _bundle_bytes()
     checksum = hashlib.sha256(bundle).hexdigest()
@@ -46,6 +62,37 @@ def test_checksum_mismatch_stops_update(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="checksum verification failed"):
         updater.install_latest()
+
+
+def test_update_refreshes_systemd_units(tmp_path, monkeypatch):
+    bundle = _bundle_with_systemd()
+    checksum = hashlib.sha256(bundle).hexdigest()
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    calls: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(updater, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
+    monkeypatch.setattr(updater, "SYSTEMD_UNIT_DIR", unit_dir)
+    monkeypatch.setattr(
+        updater,
+        "_download",
+        lambda url: checksum.encode() if url.endswith(".sha256") else bundle,
+    )
+    monkeypatch.setattr(updater.subprocess, "run", lambda args, **kwargs: calls.append(args) or Result())
+
+    result = updater.install_latest()
+
+    assert result["updated"] is True
+    assert result["systemd"]["refreshed"] is True
+    assert (unit_dir / "crashpilot-update.timer").read_text() == "[Timer]\nOnCalendar=hourly\n"
+    assert ["systemctl", "daemon-reload"] in calls
+    assert ["systemctl", "enable", "--now", "crashpilot-update.timer"] in calls
+    assert ["systemctl", "enable", "--now", "crashpilot-heartbeat.timer"] in calls
 
 
 def test_safe_extract_rejects_path_traversal(tmp_path):
