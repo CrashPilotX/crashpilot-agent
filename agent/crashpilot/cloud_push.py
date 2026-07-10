@@ -27,8 +27,9 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(10.0)
 _LIVE_DMESG_TTL_SECONDS = 300
-_LIVE_DMESG_TAIL_CHARS = 8000
-_LIVE_DMESG_MAX_CRITICAL = 80
+_LIVE_DMESG_TAIL_CHARS = 2000
+_LIVE_DMESG_MAX_CRITICAL = 20
+_HARDWARE_PROFILE_TTL_SECONDS = 86400  # 24 h — hardware almost never changes
 _LIVE_DMESG_PATTERN = re.compile(
     "|".join([
         r"Kernel panic",
@@ -684,6 +685,57 @@ def _collect_block_devices() -> list[dict[str, Any]]:
                 walk(children, item.get("name"))
     walk(payload.get("blockdevices", []))
     return devices[:80]
+
+
+def _hardware_profile_cache_path() -> Path | None:
+    try:
+        from .config import get_settings
+
+        data_dir = get_settings().data_dir
+        if data_dir is None:
+            return None
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / "hardware_profile.json"
+    except Exception:
+        return None
+
+
+def _collect_hardware_profile() -> dict[str, Any]:
+    """Collect static hardware details (CPU/memory/block devices), cached for 24 h.
+
+    These collectors run external tools (lscpu, dmidecode, lsblk) that add 10-100 KB
+    to every heartbeat.  Since the data rarely changes, we cache it on disk and skip
+    the collection on subsequent heartbeats within the TTL window.
+    """
+    cache_path = _hardware_profile_cache_path()
+    if cache_path is not None:
+        try:
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            if time.time() - float(cache.get("saved_at", 0)) <= _HARDWARE_PROFILE_TTL_SECONDS:
+                profile = cache.get("profile")
+                if isinstance(profile, dict):
+                    return profile
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+
+    profile: dict[str, Any] = {
+        "cpu": _collect_cpu_hardware(),
+        "memory": _collect_memory_hardware(),
+        "block_devices": _collect_block_devices(),
+    }
+
+    if cache_path is not None:
+        try:
+            cache_path.write_text(
+                json.dumps({"saved_at": time.time(), "profile": profile}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    return profile
+
+
 def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
     """Small diagnostic payload shown in the dashboard health panel."""
     health: dict[str, Any] = {
@@ -740,6 +792,7 @@ def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
 def _build_live_metrics() -> dict[str, Any]:
     """Small heartbeat payload for near-live resource load in the dashboard."""
     metrics: dict[str, Any] = {}
+    hw = _collect_hardware_profile()
 
     cpu_count = os.cpu_count() or 1
     try:
@@ -750,10 +803,10 @@ def _build_live_metrics() -> dict[str, Any]:
             "load_5m": round(load_5m, 2),
             "load_15m": round(load_15m, 2),
             "load_pct": min(round((load_1m / cpu_count) * 100, 1), 999.0),
-            "hardware": _collect_cpu_hardware(),
+            "hardware": hw["cpu"],
         }
     except OSError:
-        metrics["cpu"] = {"cpu_count": cpu_count, "hardware": _collect_cpu_hardware()}
+        metrics["cpu"] = {"cpu_count": cpu_count, "hardware": hw["cpu"]}
 
     mem = _read_meminfo()
     if mem:
@@ -769,12 +822,12 @@ def _build_live_metrics() -> dict[str, Any]:
             "used_pct": round((used_kb / total_kb) * 100, 1) if total_kb else 0,
             "swap_used_gb": round((swap_total_kb - swap_free_kb) / 1024 / 1024, 2),
             "swap_total_gb": round(swap_total_kb / 1024 / 1024, 2),
-            "hardware": _collect_memory_hardware(),
+            "hardware": hw["memory"],
         }
 
     disk = _collect_disk_usage()
     if disk:
-        disk["block_devices"] = _collect_block_devices()
+        disk["block_devices"] = hw["block_devices"]
         metrics["disk"] = disk
 
     network = _collect_network_usage()
