@@ -96,7 +96,9 @@ class Settings(BaseSettings):
     # Egress budget — bytes this agent may send to Supabase per UTC day.
     # Heartbeats are skipped when the limit is hit; crash reports are always sent.
     # Set to 0 to disable limiting.
-    egress_daily_limit_mb: int = 50
+    # Budget math: 5 GB/month ÷ 100 systems ÷ 30 days ≈ 1.71 MB/system/day.
+    # Default of 2 MB leaves a small burst buffer; lower to 1 for >85 systems.
+    egress_daily_limit_mb: int = 2
 
     # Optional capacity test. Disabled by default because it uses external
     # speedtest servers and can consume significant bandwidth. Passive RX/TX
