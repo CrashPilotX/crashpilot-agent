@@ -57,8 +57,15 @@ class TestPushHeartbeat:
             await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
             assert route.called
 
-    async def test_correct_payload(self):
+    async def test_correct_payload(self, monkeypatch, tmp_path):
         """Heartbeat includes system_id, agent_token, hostname, version, and metrics."""
+        monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: tmp_path / "section_ttl.json")
+        monkeypatch.setattr(cloud_push, "_read_meminfo", lambda: {
+            "MemTotal": 1024 * 1024,
+            "MemAvailable": 512 * 1024,
+            "SwapTotal": 0,
+            "SwapFree": 0,
+        })
         with respx.mock:
             route = respx.post(HB_URL).mock(return_value=httpx.Response(200))
             mock_legacy_status()
@@ -119,8 +126,9 @@ class TestPushHeartbeat:
         assert updated["heartbeats_minimal"] == 1
         assert updated.get("heartbeats_skipped", 0) == 0
 
-    async def test_syncs_maintenance_status(self, monkeypatch):
+    async def test_syncs_maintenance_status(self, monkeypatch, tmp_path):
         saved: list[tuple[str, str]] = []
+        monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: tmp_path / "section_ttl.json")
         monkeypatch.setattr(
             "crashpilot.storage.store.set_meta",
             lambda key, value: saved.append((key, value)),
@@ -137,6 +145,47 @@ class TestPushHeartbeat:
         assert status.called
         assert result["in_maintenance"] is True
         assert saved == [("maintenance_until", "2026-06-18T20:00:00Z")]
+
+    async def test_in_between_heartbeat_sends_tiny_pulse(self, monkeypatch, tmp_path):
+        """Most one-minute ticks should refresh last_ping without resending telemetry."""
+        ttl_path = tmp_path / "section_ttl.json"
+        now = cloud_push.time.time()
+        ttl_path.write_text(json.dumps({"live_metrics": now, "cloud_status": now}))
+        monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: ttl_path)
+        monkeypatch.setattr(
+            cloud_push,
+            "_build_live_metrics",
+            lambda **kwargs: (_ for _ in ()).throw(AssertionError("should send pulse")),
+        )
+
+        with respx.mock:
+            route = respx.post(HB_URL).mock(return_value=httpx.Response(200))
+            status = respx.post(STATUS_URL).mock(return_value=httpx.Response(200, json={}))
+            await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
+
+        payload = json.loads(route.calls[0].request.content)
+        assert set(payload["p_metrics"]) == {"heartbeat"}
+        assert payload["p_metrics"]["heartbeat"]["mode"] == "pulse"
+        assert not status.called
+
+    async def test_cloud_status_poll_is_throttled(self, monkeypatch, tmp_path):
+        """Remote update/maintenance status is useful, but not every minute."""
+        ttl_path = tmp_path / "section_ttl.json"
+        ttl_path.write_text(json.dumps({"cloud_status": cloud_push.time.time()}))
+        monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: ttl_path)
+
+        with respx.mock:
+            respx.post(HB_URL).mock(return_value=httpx.Response(200))
+            status = respx.post(STATUS_URL).mock(return_value=httpx.Response(200, json={}))
+            await push_heartbeat(
+                SUPABASE_URL,
+                ANON_KEY,
+                SYSTEM_ID,
+                AGENT_TOKEN,
+                metrics={"cpu": {"load_pct": 1}},
+            )
+
+        assert not status.called
 
     async def test_metrics_rpc_falls_back_to_legacy_heartbeat(self):
         """Older Supabase schemas without p_metrics still receive a legacy heartbeat."""
@@ -246,7 +295,7 @@ class TestPushHeartbeat:
         }))
 
         monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: ttl_path)
-        monkeypatch.setattr(cloud_push.os, "getloadavg", lambda: (0.5, 0.4, 0.3))
+        monkeypatch.setattr(cloud_push.os, "getloadavg", lambda: (0.5, 0.4, 0.3), raising=False)
         monkeypatch.setattr(cloud_push, "_read_meminfo", lambda: {
             "MemTotal": 1024 * 1024,
             "MemAvailable": 512 * 1024,
@@ -282,7 +331,7 @@ class TestPushHeartbeat:
         }))
 
         monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: ttl_path)
-        monkeypatch.setattr(cloud_push.os, "getloadavg", lambda: (0.5, 0.4, 0.3))
+        monkeypatch.setattr(cloud_push.os, "getloadavg", lambda: (0.5, 0.4, 0.3), raising=False)
         monkeypatch.setattr(cloud_push, "_read_meminfo", lambda: {})
         monkeypatch.setattr(cloud_push, "_collect_disk_usage", lambda: {})
         monkeypatch.setattr(cloud_push, "_collect_network_usage", lambda: {})
@@ -303,7 +352,7 @@ class TestPushHeartbeat:
     def test_slim_live_metrics_trim_verbose_detail(self, monkeypatch, tmp_path):
         """Soft-cap slim mode keeps live values but drops bulky detail."""
         monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: tmp_path / "section_ttl.json")
-        monkeypatch.setattr(cloud_push.os, "getloadavg", lambda: (0.5, 0.4, 0.3))
+        monkeypatch.setattr(cloud_push.os, "getloadavg", lambda: (0.5, 0.4, 0.3), raising=False)
         monkeypatch.setattr(cloud_push, "_read_meminfo", lambda: {})
         monkeypatch.setattr(cloud_push, "_collect_disk_usage", lambda: {
             "primary": {"used_pct": 10},

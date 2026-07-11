@@ -37,6 +37,8 @@ _DMESG_SECTION_TTL_SECS         = 300   # every 5 min — matches dmesg file cac
 _FLIGHT_RECORDER_SECTION_TTL_SECS = 600  # every 10 min — 6-hour window summary
 _AGENT_HEALTH_SECTION_TTL_SECS  = 1800  # every 30 min — version/timer states
 _HARDWARE_SECTION_TTL_SECS      = 86400 # every 24 h — static CPU/memory/disk profile
+_LIVE_METRICS_SECTION_TTL_SECS  = 300   # every 5 min — keep one-minute ticks tiny
+_CLOUD_STATUS_TTL_SECS          = 600   # every 10 min — remote update/maintenance poll
 _LIVE_DMESG_PATTERN = re.compile(
     "|".join([
         r"Kernel panic",
@@ -893,6 +895,50 @@ def _build_minimal_heartbeat_metrics(bytes_used: int, hard_limit_bytes: int) -> 
     }
 
 
+def _settings_int(name: str, default: int, *, minimum: int = 0) -> int:
+    try:
+        from .config import get_settings
+
+        value = int(getattr(get_settings(), name, default))
+    except Exception:
+        value = default
+    return max(value, minimum)
+
+
+def _live_metrics_interval_seconds() -> int:
+    return _settings_int(
+        "live_metrics_interval_seconds",
+        _LIVE_METRICS_SECTION_TTL_SECS,
+        minimum=60,
+    )
+
+
+def _cloud_status_interval_seconds() -> int:
+    return _settings_int(
+        "cloud_status_interval_seconds",
+        _CLOUD_STATUS_TTL_SECS,
+        minimum=60,
+    )
+
+
+def _build_pulse_metrics(mode: str, bytes_used: int, hard_limit_bytes: int) -> dict[str, Any]:
+    """Tiny in-between heartbeat that refreshes last_ping without resending telemetry."""
+    return {
+        "heartbeat": {
+            "mode": mode,
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+            "live_metrics_interval_seconds": _live_metrics_interval_seconds(),
+            "egress": {
+                "bytes_sent": bytes_used,
+                "limit_bytes": hard_limit_bytes,
+                "used_pct": round(bytes_used / hard_limit_bytes * 100, 1)
+                if hard_limit_bytes
+                else None,
+            },
+        }
+    }
+
+
 def _build_hardware_profile_metrics() -> dict[str, Any]:
     """Static hardware profile sent on a slow cadence, not every heartbeat."""
     hw = _collect_hardware_profile()
@@ -938,6 +984,16 @@ def _save_section_ttl(path: Path | None, ttl: dict[str, float]) -> None:
         path.write_text(json.dumps(ttl), encoding="utf-8")
     except OSError:
         pass
+
+
+def _section_due(sent_at: dict[str, float], section: str, interval_seconds: int) -> bool:
+    return time.time() - sent_at.get(section, 0) >= interval_seconds
+
+
+def _mark_section_sent(section: str) -> None:
+    section_path = _section_ttl_path()
+    sent_at = _load_section_ttl(section_path)
+    _save_section_ttl(section_path, {**sent_at, section: time.time()})
 
 
 def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
@@ -1012,8 +1068,11 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
 
     cpu_count = os.cpu_count() or 1
+    getloadavg = getattr(os, "getloadavg", None)
     try:
-        load_1m, load_5m, load_15m = os.getloadavg()
+        if not callable(getloadavg):
+            raise OSError("load average is not available on this platform")
+        load_1m, load_5m, load_15m = getloadavg()
         metrics["cpu"] = {
             "cpu_count": cpu_count,
             "load_1m": round(load_1m, 2),
@@ -1248,19 +1307,42 @@ async def push_heartbeat(
             bytes_used / 1024 / 1024,
         )
 
+    sent_at = _load_section_ttl(_section_ttl_path())
+    live_metrics_due = _section_due(
+        sent_at,
+        "live_metrics",
+        _live_metrics_interval_seconds(),
+    )
+    status_due = _section_due(
+        sent_at,
+        "cloud_status",
+        _cloud_status_interval_seconds(),
+    )
+    if metrics is not None:
+        heartbeat_metrics = metrics
+        live_metrics_due = False
+    elif minimal_mode:
+        heartbeat_metrics = _build_minimal_heartbeat_metrics(bytes_used, hard_limit_bytes)
+        live_metrics_due = False
+    elif live_metrics_due:
+        heartbeat_metrics = _build_live_metrics(slim=slim_mode)
+    else:
+        heartbeat_metrics = _build_pulse_metrics(
+            "slim" if slim_mode else "pulse",
+            bytes_used,
+            hard_limit_bytes,
+        )
+
     url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_heartbeat"
     payload = {
         "p_system_id": system_id,
         "p_agent_token": agent_token,
         "p_hostname": _hostname(),
         "p_version": _agent_version(),
-        "p_metrics": (
-            metrics if metrics is not None else
-            _build_minimal_heartbeat_metrics(bytes_used, hard_limit_bytes) if minimal_mode else
-            _build_live_metrics(slim=slim_mode)
-        ),
+        "p_metrics": heartbeat_metrics,
     }
     payload_bytes = json.dumps(payload).encode()
+    status_bytes = 0
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(url, headers=_headers(anon_key), content=payload_bytes)
@@ -1273,33 +1355,44 @@ async def push_heartbeat(
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise RuntimeError(_explain_http_error(exc)) from exc
-        status_url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_system_status"
-        status_resp = await client.post(
-            status_url,
-            headers=_headers(anon_key),
-            json={"p_system_id": system_id, "p_agent_token": agent_token},
-        )
 
     response_data: dict[str, Any] = {}
-    if status_resp.status_code != 404:
-        try:
-            status_resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise RuntimeError(_explain_http_error(exc)) from exc
-        try:
-            decoded = status_resp.json()
-            if isinstance(decoded, dict):
-                response_data = decoded
-        except (ValueError, json.JSONDecodeError):
-            pass
+    if status_due:
+        status_url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_system_status"
+        status_payload = {"p_system_id": system_id, "p_agent_token": agent_token}
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            status_resp = await client.post(
+                status_url,
+                headers=_headers(anon_key),
+                json=status_payload,
+            )
+        status_bytes = len(json.dumps(status_payload).encode()) + len(status_resp.content)
+        if status_resp.status_code != 404:
+            try:
+                status_resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(_explain_http_error(exc)) from exc
+            try:
+                decoded = status_resp.json()
+                if isinstance(decoded, dict):
+                    response_data = decoded
+            except (ValueError, json.JSONDecodeError):
+                pass
 
-        from .storage.store import set_meta
+            from .storage.store import set_meta
 
-        set_meta("maintenance_until", response_data.get("maintenance_until") or "")
-        _maybe_start_remote_update(response_data)
+            set_meta("maintenance_until", response_data.get("maintenance_until") or "")
+            _maybe_start_remote_update(response_data)
+
+        # Older schemas may not expose agent_system_status; remember that check too
+        # so we do not spend a second HTTP request every minute discovering it again.
+        _mark_section_sent("cloud_status")
+
+    if live_metrics_due:
+        _mark_section_sent("live_metrics")
 
     _record_egress(
-        len(payload_bytes) + len(resp.content) + len(status_resp.content),
+        len(payload_bytes) + len(resp.content) + status_bytes,
         "heartbeat_minimal" if minimal_mode else "heartbeat",
     )
     log.debug("Heartbeat sent for system %s", system_id)

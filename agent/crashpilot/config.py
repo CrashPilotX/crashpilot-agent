@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     bandwidth_speedtest_interval_seconds: int = 21600
     bandwidth_speedtest_timeout_seconds: int = 90
 
+    # Cloud heartbeat egress controls.  The one-minute heartbeat keeps systems
+    # online, but detailed live metrics and status polling can run less often.
+    live_metrics_interval_seconds: int = 300
+    cloud_status_interval_seconds: int = 600
+
     def model_post_init(self, __context: object) -> None:
         data_dir = self.data_dir or _default_data_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
