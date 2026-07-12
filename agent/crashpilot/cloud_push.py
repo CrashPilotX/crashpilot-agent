@@ -27,18 +27,18 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(10.0)
 _LIVE_DMESG_TTL_SECONDS = 300
-_LIVE_DMESG_TAIL_CHARS = 2000
-_LIVE_DMESG_MAX_CRITICAL = 20
+_LIVE_DMESG_TAIL_CHARS = 800
+_LIVE_DMESG_MAX_CRITICAL = 10
 _HARDWARE_PROFILE_TTL_SECONDS = 86400  # 24 h — hardware almost never changes
 
 # Per-section send intervals for stable heartbeat sections.
 # Live metrics (cpu/memory/disk/gpu/network) are always included.
-_DMESG_SECTION_TTL_SECS         = 300   # every 5 min — matches dmesg file cache
-_FLIGHT_RECORDER_SECTION_TTL_SECS = 600  # every 10 min — 6-hour window summary
-_AGENT_HEALTH_SECTION_TTL_SECS  = 1800  # every 30 min — version/timer states
+_DMESG_SECTION_TTL_SECS         = 1800  # every 30 min — live incident hints
+_FLIGHT_RECORDER_SECTION_TTL_SECS = 3600  # every 60 min — 6-hour window summary
+_AGENT_HEALTH_SECTION_TTL_SECS  = 3600  # every 60 min — version/timer states
 _HARDWARE_SECTION_TTL_SECS      = 86400 # every 24 h — static CPU/memory/disk profile
-_LIVE_METRICS_SECTION_TTL_SECS  = 300   # every 5 min — keep one-minute ticks tiny
-_CLOUD_STATUS_TTL_SECS          = 600   # every 10 min — remote update/maintenance poll
+_LIVE_METRICS_SECTION_TTL_SECS  = 900   # every 15 min — keep one-minute ticks tiny
+_CLOUD_STATUS_TTL_SECS          = 1800  # every 30 min — remote update/maintenance poll
 _LIVE_DMESG_PATTERN = re.compile(
     "|".join([
         r"Kernel panic",
@@ -185,7 +185,7 @@ def _collect_disk_usage() -> dict[str, Any]:
     return {
         "primary": root,
         "root": root,
-        "filesystems": filesystems[:12],
+        "filesystems": filesystems[:6],
         "most_used": most_used,
         "lowest_free": lowest_free,
     }
@@ -365,7 +365,7 @@ def _read_network_counters(proc_net_dev: Path = Path("/proc/net/dev")) -> dict[s
         return {}
 
     return {
-        "interfaces": interfaces[:12],
+        "interfaces": interfaces[:4],
         "rx_bytes": sum(item["rx_bytes"] for item in interfaces),
         "tx_bytes": sum(item["tx_bytes"] for item in interfaces),
     }
@@ -558,7 +558,6 @@ def _collect_cpu_hardware() -> dict[str, Any]:
             "model": first.get("model"),
             "stepping": first.get("stepping"),
             "microcode": first.get("microcode"),
-            "flags": flags,
             "instruction_flags": instruction_flags,
         })
     except OSError:

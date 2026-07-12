@@ -99,8 +99,8 @@ class Settings(BaseSettings):
     # are skipped entirely until UTC midnight. Crash reports are always sent.
     # Set either to 0 to disable that tier.
     # Budget math: 5 GB/month ÷ 100 systems ÷ 30 days ≈ 1.71 MB/system/day.
-    egress_soft_limit_mb: int = 5
-    egress_daily_limit_mb: int = 8
+    egress_soft_limit_mb: int = 1
+    egress_daily_limit_mb: int = 2
 
     # Optional capacity test. Disabled by default because it uses external
     # speedtest servers and can consume significant bandwidth. Passive RX/TX
@@ -111,8 +111,8 @@ class Settings(BaseSettings):
 
     # Cloud heartbeat egress controls.  The one-minute heartbeat keeps systems
     # online, but detailed live metrics and status polling can run less often.
-    live_metrics_interval_seconds: int = 300
-    cloud_status_interval_seconds: int = 600
+    live_metrics_interval_seconds: int = 900
+    cloud_status_interval_seconds: int = 1800
 
     def model_post_init(self, __context: object) -> None:
         data_dir = self.data_dir or _default_data_dir()
