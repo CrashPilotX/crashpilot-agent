@@ -119,9 +119,9 @@ class TestPushHeartbeat:
         assert route.called
         payload = json.loads(route.calls[0].request.content)
         metrics = payload["p_metrics"]
-        assert set(metrics) == {"agent_health"}
-        assert metrics["agent_health"]["egress"]["mode"] == "minimal"
-        assert metrics["agent_health"]["egress"]["hard_limit_exceeded"] is True
+        assert set(metrics) == {"heartbeat"}
+        assert metrics["heartbeat"]["mode"] == "minimal"
+        assert metrics["heartbeat"]["egress"]["hard_limit_exceeded"] is True
         updated = json.loads(tracker.read_text(encoding="utf-8"))
         assert updated["heartbeats_minimal"] == 1
         assert updated.get("heartbeats_skipped", 0) == 0

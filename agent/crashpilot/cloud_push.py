@@ -881,15 +881,17 @@ def _record_skipped_heartbeat() -> None:
 def _build_minimal_heartbeat_metrics(bytes_used: int, hard_limit_bytes: int) -> dict[str, Any]:
     """Tiny heartbeat payload used after the daily egress hard limit is reached."""
     return {
-        "agent_health": {
-            "collected_at": datetime.now(timezone.utc).isoformat(),
-            "version": _agent_version(),
-            "hostname": _hostname(),
-            "egress": _egress_status(
-                mode="minimal",
-                bytes_used=bytes_used,
-                hard_limit_bytes=hard_limit_bytes,
-            ),
+        "heartbeat": {
+            "mode": "minimal",
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+            "egress": {
+                "bytes_sent": bytes_used,
+                "limit_bytes": hard_limit_bytes,
+                "used_pct": round(bytes_used / hard_limit_bytes * 100, 1)
+                if hard_limit_bytes
+                else None,
+                "hard_limit_exceeded": True,
+            },
         }
     }
 
