@@ -27,7 +27,7 @@ def _bundle_with_systemd() -> bytes:
     members = {
         "CrashPilot/agent/pyproject.toml": b"[project]\nname='crashpilot'\nversion='0.1.0'\n",
         "CrashPilot/systemd/crashpilot-update.timer": b"[Timer]\nOnCalendar=hourly\n",
-        "CrashPilot/systemd/crashpilot-update.service": b"[Service]\nExecStart=/opt/crashpilot/venv/bin/crashpilot update --quiet\n",
+        "CrashPilot/systemd/crashpilot-update.service": b"[Service]\nExecStart=/opt/crashpilot/venv/bin/crashpilot update --quiet\nExecStartPost=/opt/crashpilot/venv/bin/crashpilot heartbeat --quiet\n",
         "CrashPilot/systemd/crashpilot-heartbeat.timer": b"[Timer]\nOnUnitActiveSec=60s\n",
     }
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
@@ -88,11 +88,39 @@ def test_update_refreshes_systemd_units(tmp_path, monkeypatch):
     result = updater.install_latest()
 
     assert result["updated"] is True
+    assert result["egress_tracker_cleared"] is False
     assert result["systemd"]["refreshed"] is True
     assert (unit_dir / "crashpilot-update.timer").read_text() == "[Timer]\nOnCalendar=hourly\n"
+    assert "heartbeat --quiet" in (unit_dir / "crashpilot-update.service").read_text()
     assert ["systemctl", "daemon-reload"] in calls
     assert ["systemctl", "enable", "--now", "crashpilot-update.timer"] in calls
     assert ["systemctl", "enable", "--now", "crashpilot-heartbeat.timer"] in calls
+
+
+def test_update_clears_stale_egress_tracker(tmp_path, monkeypatch):
+    bundle = _bundle_bytes()
+    checksum = hashlib.sha256(bundle).hexdigest()
+    tracker = tmp_path / "daily_egress.json"
+    tracker.write_text('{"bytes_sent":999999999}', encoding="utf-8")
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(updater, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
+    monkeypatch.setattr(
+        updater,
+        "_download",
+        lambda url: checksum.encode() if url.endswith(".sha256") else bundle,
+    )
+    monkeypatch.setattr(updater.subprocess, "run", lambda *args, **kwargs: Result())
+
+    result = updater.install_latest()
+
+    assert result["updated"] is True
+    assert result["egress_tracker_cleared"] is True
+    assert not tracker.exists()
 
 
 def test_safe_extract_rejects_path_traversal(tmp_path):

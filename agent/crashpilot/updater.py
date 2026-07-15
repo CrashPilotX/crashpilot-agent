@@ -92,6 +92,23 @@ def _refresh_systemd_units(bundle_root: Path) -> dict[str, Any]:
     return result
 
 
+def _clear_egress_tracker(data_dir: Path) -> bool:
+    """Remove stale daily egress state after an update.
+
+    Bad quota defaults can leave an otherwise healthy agent stuck in slim or
+    minimal mode until UTC midnight.  A verified update is an intentional
+    operator-controlled recovery point, so start the new agent with a fresh
+    daily counter.
+    """
+    try:
+        (data_dir / "daily_egress.json").unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
 def install_latest(
     *,
     force: bool = False,
@@ -149,5 +166,11 @@ def install_latest(
 
         systemd_result = _refresh_systemd_units(bundle_root)
 
+    egress_tracker_cleared = _clear_egress_tracker(data_dir)
     state_path.write_text(expected + "\n", encoding="utf-8")
-    return {"updated": True, "checksum": expected, "systemd": systemd_result}
+    return {
+        "updated": True,
+        "checksum": expected,
+        "systemd": systemd_result,
+        "egress_tracker_cleared": egress_tracker_cleared,
+    }
