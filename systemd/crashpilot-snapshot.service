@@ -4,5 +4,5 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=__CRASHPILOT_BIN__ snapshot --quiet
+ExecStart=/usr/local/bin/crashpilot snapshot --quiet
 Nice=10

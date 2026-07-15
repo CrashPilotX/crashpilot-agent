@@ -5,6 +5,6 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=__CRASHPILOT_BIN__ update --quiet
-ExecStartPost=__CRASHPILOT_BIN__ heartbeat --quiet
+ExecStart=/usr/local/bin/crashpilot update --quiet
+ExecStartPost=/usr/local/bin/crashpilot heartbeat --quiet
 Nice=10
