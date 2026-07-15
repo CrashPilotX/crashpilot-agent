@@ -764,9 +764,9 @@ def _egress_daily_limit_bytes() -> int:
     try:
         from .config import get_settings
 
-        limit_mb = int(getattr(get_settings(), "egress_daily_limit_mb", 8))
+        limit_mb = int(getattr(get_settings(), "egress_daily_limit_mb", 32))
     except Exception:
-        limit_mb = 8
+        limit_mb = 32
     return max(limit_mb, 0) * 1024 * 1024
 
 
@@ -775,9 +775,9 @@ def _egress_soft_limit_bytes() -> int:
     try:
         from .config import get_settings
 
-        limit_mb = int(getattr(get_settings(), "egress_soft_limit_mb", 5))
+        limit_mb = int(getattr(get_settings(), "egress_soft_limit_mb", 16))
     except Exception:
-        limit_mb = 5
+        limit_mb = 16
     return max(limit_mb, 0) * 1024 * 1024
 
 

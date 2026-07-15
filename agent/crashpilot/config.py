@@ -99,8 +99,8 @@ class Settings(BaseSettings):
     # switch to an ultra-tiny keepalive until UTC midnight. Crash reports are always sent.
     # Set either to 0 to disable that tier.
     # Budget math: 5 GB/month ÷ 100 systems ÷ 30 days ≈ 1.71 MB/system/day.
-    egress_soft_limit_mb: int = 4
-    egress_daily_limit_mb: int = 8
+    egress_soft_limit_mb: int = 16
+    egress_daily_limit_mb: int = 32
 
     # Optional capacity test. Disabled by default because it uses external
     # speedtest servers and can consume significant bandwidth. Passive RX/TX

@@ -28,6 +28,8 @@ class TestSettings:
         assert cfg.dmesg_lines == 2000
         assert cfg.confidence_threshold == 0.4
         assert cfg.analysis_timeout == 120
+        assert cfg.egress_soft_limit_mb == 16
+        assert cfg.egress_daily_limit_mb == 32
 
     def test_data_dir_created(self, tmp_path, monkeypatch):
         data_dir = tmp_path / "crashpilot_data"
