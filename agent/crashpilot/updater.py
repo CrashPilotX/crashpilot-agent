@@ -47,6 +47,25 @@ def _safe_extract(bundle_path: Path, destination: Path) -> None:
         archive.extractall(destination)
 
 
+def _crashpilot_bin_path() -> str:
+    """Return the installed console-script path used by systemd units."""
+    candidate = Path(sys.executable).with_name("crashpilot")
+    if candidate.exists():
+        return str(candidate)
+    resolved = shutil.which("crashpilot")
+    if resolved:
+        return resolved
+    return str(candidate)
+
+
+def _install_systemd_unit_template(src: Path, dest: Path) -> None:
+    rendered = src.read_text(encoding="utf-8").replace(
+        "__CRASHPILOT_BIN__",
+        _crashpilot_bin_path(),
+    )
+    dest.write_text(rendered, encoding="utf-8")
+
+
 def _refresh_systemd_units(bundle_root: Path) -> dict[str, Any]:
     """Best-effort refresh of installed systemd units from the verified bundle."""
     systemd_dir = bundle_root / "systemd"
@@ -68,7 +87,11 @@ def _refresh_systemd_units(bundle_root: Path) -> dict[str, Any]:
         for name in unit_names:
             src = systemd_dir / name
             if src.is_file():
-                shutil.copy2(src, unit_dir / name)
+                dest = unit_dir / name
+                if src.suffix == ".service":
+                    _install_systemd_unit_template(src, dest)
+                else:
+                    shutil.copy2(src, dest)
                 copied.append(name)
         if not copied:
             return result

@@ -78,6 +78,7 @@ def test_update_refreshes_systemd_units(tmp_path, monkeypatch):
 
     monkeypatch.setattr(updater, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
     monkeypatch.setattr(updater, "SYSTEMD_UNIT_DIR", unit_dir)
+    monkeypatch.setattr(updater, "_crashpilot_bin_path", lambda: "/opt/crashpilot/venv/bin/crashpilot")
     monkeypatch.setattr(
         updater,
         "_download",
@@ -91,10 +92,26 @@ def test_update_refreshes_systemd_units(tmp_path, monkeypatch):
     assert result["egress_tracker_cleared"] is False
     assert result["systemd"]["refreshed"] is True
     assert (unit_dir / "crashpilot-update.timer").read_text() == "[Timer]\nOnCalendar=hourly\n"
-    assert "heartbeat --quiet" in (unit_dir / "crashpilot-update.service").read_text()
+    update_service = (unit_dir / "crashpilot-update.service").read_text()
+    assert "__CRASHPILOT_BIN__" not in update_service
+    assert "ExecStart=/opt/crashpilot/venv/bin/crashpilot update --quiet" in update_service
+    assert "ExecStartPost=/opt/crashpilot/venv/bin/crashpilot heartbeat --quiet" in update_service
     assert ["systemctl", "daemon-reload"] in calls
     assert ["systemctl", "enable", "--now", "crashpilot-update.timer"] in calls
     assert ["systemctl", "enable", "--now", "crashpilot-heartbeat.timer"] in calls
+
+
+def test_systemd_unit_template_replaces_crashpilot_placeholder(tmp_path, monkeypatch):
+    src = tmp_path / "unit.service"
+    dest = tmp_path / "installed.service"
+    src.write_text("[Service]\nExecStart=__CRASHPILOT_BIN__ heartbeat --quiet\n", encoding="utf-8")
+    monkeypatch.setattr(updater, "_crashpilot_bin_path", lambda: "/opt/crashpilot/venv/bin/crashpilot")
+
+    updater._install_systemd_unit_template(src, dest)
+
+    assert dest.read_text(encoding="utf-8") == (
+        "[Service]\nExecStart=/opt/crashpilot/venv/bin/crashpilot heartbeat --quiet\n"
+    )
 
 
 def test_update_clears_stale_egress_tracker(tmp_path, monkeypatch):
