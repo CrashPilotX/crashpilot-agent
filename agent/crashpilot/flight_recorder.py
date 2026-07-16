@@ -150,7 +150,8 @@ def capture_snapshot(*, deep: bool = False) -> dict[str, Any]:
     root = psutil.disk_usage("/")
     disk_io = psutil.disk_io_counters()
     net_io = psutil.net_io_counters()
-    load_1m, load_5m, load_15m = os.getloadavg()
+    getloadavg = getattr(os, "getloadavg", None)
+    load_1m, load_5m, load_15m = getloadavg() if getloadavg else (0.0, 0.0, 0.0)
     snapshot = {
         "schema_version": 1,
         "captured_at": datetime.now(timezone.utc).isoformat(),
