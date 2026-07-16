@@ -1361,33 +1361,40 @@ async def push_heartbeat(
     if status_due:
         status_url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_system_status"
         status_payload = {"p_system_id": system_id, "p_agent_token": agent_token}
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            status_resp = await client.post(
-                status_url,
-                headers=_headers(anon_key),
-                json=status_payload,
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                status_resp = await client.post(
+                    status_url,
+                    headers=_headers(anon_key),
+                    json=status_payload,
+                )
+            status_bytes = len(json.dumps(status_payload).encode()) + len(status_resp.content)
+            if status_resp.status_code != 404:
+                try:
+                    status_resp.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    raise RuntimeError(_explain_http_error(exc)) from exc
+                try:
+                    decoded = status_resp.json()
+                    if isinstance(decoded, dict):
+                        response_data = decoded
+                except (ValueError, json.JSONDecodeError):
+                    pass
+
+                from .storage.store import set_meta
+
+                set_meta("maintenance_until", response_data.get("maintenance_until") or "")
+                _maybe_start_remote_update(response_data)
+
+            # Older schemas may not expose agent_system_status; remember that check too
+            # so we do not spend a second HTTP request every minute discovering it again.
+            _mark_section_sent("cloud_status")
+        except Exception as exc:
+            log.warning(
+                "Heartbeat reached Supabase, but the optional status poll failed: %s",
+                exc,
             )
-        status_bytes = len(json.dumps(status_payload).encode()) + len(status_resp.content)
-        if status_resp.status_code != 404:
-            try:
-                status_resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                raise RuntimeError(_explain_http_error(exc)) from exc
-            try:
-                decoded = status_resp.json()
-                if isinstance(decoded, dict):
-                    response_data = decoded
-            except (ValueError, json.JSONDecodeError):
-                pass
-
-            from .storage.store import set_meta
-
-            set_meta("maintenance_until", response_data.get("maintenance_until") or "")
-            _maybe_start_remote_update(response_data)
-
-        # Older schemas may not expose agent_system_status; remember that check too
-        # so we do not spend a second HTTP request every minute discovering it again.
-        _mark_section_sent("cloud_status")
+            _mark_section_sent("cloud_status")
 
     if live_metrics_due:
         _mark_section_sent("live_metrics")

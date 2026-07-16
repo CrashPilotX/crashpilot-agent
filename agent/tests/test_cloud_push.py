@@ -146,6 +146,30 @@ class TestPushHeartbeat:
         assert result["in_maintenance"] is True
         assert saved == [("maintenance_until", "2026-06-18T20:00:00Z")]
 
+    async def test_status_poll_failure_does_not_fail_successful_heartbeat(self, monkeypatch, tmp_path, caplog):
+        """The optional control-plane poll must not make a delivered heartbeat look failed."""
+        monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: tmp_path / "section_ttl.json")
+
+        with respx.mock:
+            heartbeat = respx.post(HB_URL).mock(return_value=httpx.Response(200))
+            status = respx.post(STATUS_URL).mock(
+                return_value=httpx.Response(500, json={"message": "temporary database issue"})
+            )
+            result = await push_heartbeat(
+                SUPABASE_URL,
+                ANON_KEY,
+                SYSTEM_ID,
+                AGENT_TOKEN,
+                metrics={"cpu": {"load_pct": 1}},
+            )
+
+        assert heartbeat.called
+        assert status.called
+        assert result == {}
+        assert "optional status poll failed" in caplog.text
+        ttl = json.loads((tmp_path / "section_ttl.json").read_text(encoding="utf-8"))
+        assert "cloud_status" in ttl
+
     async def test_in_between_heartbeat_sends_tiny_pulse(self, monkeypatch, tmp_path):
         """Most one-minute ticks should refresh last_ping without resending telemetry."""
         ttl_path = tmp_path / "section_ttl.json"
