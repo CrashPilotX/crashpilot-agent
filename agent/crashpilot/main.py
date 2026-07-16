@@ -516,7 +516,6 @@ def support_bundle(
         "--output",
         "-o",
         help="Destination archive",
-        is_flag=False,
     ),
 ) -> None:
     """Create a sanitized support bundle with diagnostics and recent reports."""
