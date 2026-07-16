@@ -34,7 +34,16 @@ def _validate_url(webhook_url: str) -> None:
 
 
 def build_webhook_payload(report: dict[str, Any]) -> dict[str, Any]:
-    analysis = report.get("analysis") or {}
+    raw_analysis = report.get("analysis")
+    analysis = raw_analysis if isinstance(raw_analysis, dict) else {}
+    heuristic = analysis.get("heuristic")
+    forensic_snapshot = analysis.get("forensic_snapshot")
+    remediation = analysis.get("remediation")
+    first_remediation = (
+        remediation[0]
+        if isinstance(remediation, list) and remediation and isinstance(remediation[0], dict)
+        else {}
+    )
     return {
         "event": "crashpilot.incident.created",
         "incident": {
@@ -45,11 +54,13 @@ def build_webhook_payload(report: dict[str, Any]) -> dict[str, Any]:
             "crash_time": report.get("crash_time"),
             "summary": analysis.get("root_cause") or report.get("summary"),
             "confidence": analysis.get("confidence")
-            or (analysis.get("heuristic") or {}).get("confidence"),
-            "fingerprint": (analysis.get("forensic_snapshot") or {}).get("fingerprint"),
-            "recommended_action": (
-                (analysis.get("remediation") or [{}])[0].get("action")
+            or (heuristic.get("confidence") if isinstance(heuristic, dict) else None),
+            "fingerprint": (
+                forensic_snapshot.get("fingerprint")
+                if isinstance(forensic_snapshot, dict)
+                else None
             ),
+            "recommended_action": first_remediation.get("action"),
         },
     }
 

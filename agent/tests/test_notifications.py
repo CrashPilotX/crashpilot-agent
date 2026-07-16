@@ -10,7 +10,7 @@ import httpx
 import pytest
 import respx
 
-from crashpilot.notifications import notify_webhook
+from crashpilot.notifications import build_webhook_payload, notify_webhook
 
 
 @pytest.fixture(autouse=True)
@@ -77,3 +77,20 @@ async def test_webhook_rejects_non_https_urls():
 @pytest.mark.asyncio
 async def test_empty_webhook_is_disabled():
     assert await notify_webhook("", {}) is False
+
+
+def test_webhook_payload_tolerates_malformed_analysis_shapes():
+    payload = build_webhook_payload({
+        "id": "weird-analysis",
+        "summary": "fallback summary",
+        "analysis": {
+            "heuristic": "not-a-dict",
+            "forensic_snapshot": "not-a-dict",
+            "remediation": ["not-a-dict"],
+        },
+    })
+
+    assert payload["incident"]["summary"] == "fallback summary"
+    assert payload["incident"]["confidence"] is None
+    assert payload["incident"]["fingerprint"] is None
+    assert payload["incident"]["recommended_action"] is None
