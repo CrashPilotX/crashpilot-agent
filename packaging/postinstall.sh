@@ -20,7 +20,7 @@ fi
 echo ""
 echo "CrashPilot installed. Next:"
 echo "  1. Connect to the dashboard:  sudo crashpilot configure cpilot_<string>"
-echo "     (create a system at https://kdigitalsystems.github.io/CrashPilot/)"
+echo "     (create a system at https://crashpilotx.com/)"
 echo "  2. Check everything:          sudo crashpilot doctor"
 echo "  3. Analyze the last boot:     sudo crashpilot analyze"
 echo "  AI is optional — heuristic analysis works with no API key."

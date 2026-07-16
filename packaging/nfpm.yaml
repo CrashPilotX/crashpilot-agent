@@ -18,10 +18,11 @@ homepage: https://github.com/kdigitalsystems/CrashPilot
 license: MIT
 
 # The PyInstaller binary is self-contained, so there are no runtime deps.
-# Optional tools (smartmontools, lm-sensors) only enhance telemetry.
+# Optional tools only enhance telemetry.
 recommends:
   - smartmontools
   - lm-sensors
+  - speedtest-cli
 
 contents:
   - src: dist/stage/usr/bin/crashpilot
