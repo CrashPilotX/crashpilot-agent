@@ -98,7 +98,8 @@ class Settings(BaseSettings):
     # no dmesg/flight_recorder/agent_health).  Above egress_daily_limit_mb heartbeats
     # switch to an ultra-tiny keepalive until UTC midnight. Crash reports are always sent.
     # Set either to 0 to disable that tier.
-    # Budget math: 5 GB/month ÷ 100 systems ÷ 30 days ≈ 1.71 MB/system/day.
+    # Defaults preserve online heartbeats during Supabase Free egress pressure:
+    # slim mode after 16 MB/day, minimal keepalive after 32 MB/day per system.
     egress_soft_limit_mb: int = 16
     egress_daily_limit_mb: int = 32
 
