@@ -7,7 +7,7 @@ Wants=network.target
 [Service]
 Type=simple
 User=%i
-ExecStart=/usr/local/bin/crashpilot serve --host 127.0.0.1 --port 7878
+ExecStart=__CRASHPILOT_BIN__ serve --host 127.0.0.1 --port 7878
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
