@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import stat
 
 import pytest
@@ -64,6 +65,8 @@ class TestConfigure:
 
     def test_configure_keeps_env_file_private(self, tmp_path):
         """configure writes agent credentials, so .env must not be world-readable."""
+        if os.name == "nt":
+            pytest.skip("POSIX chmod mode bits are not meaningful on Windows")
         conn_str = _make_conn_str()
         result = runner.invoke(app, ["configure", conn_str])
         assert result.exit_code == 0, result.output
