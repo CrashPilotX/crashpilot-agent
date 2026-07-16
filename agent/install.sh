@@ -293,6 +293,22 @@ install_optional_tools() {
 
 install_optional_tools
 
+install_speedtest_cli() {
+  if command -v speedtest-cli &>/dev/null; then
+    ok "  speedtest-cli"
+    return
+  fi
+
+  info "Installing speedtest-cli for internet capacity checks (best-effort)..."
+  if _try_install_pkg speedtest-cli; then
+    ok "  speedtest-cli"
+  else
+    warn "  speedtest-cli — not available (passive network throughput will still work)"
+  fi
+}
+
+install_speedtest_cli
+
 # ── journalctl permission check ───────────────────────────────────────────────
 section "Checking log access"
 
