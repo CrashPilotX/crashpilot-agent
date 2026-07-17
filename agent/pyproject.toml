@@ -48,5 +48,10 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
-ignore = ["E501"]
+# B: flake8-bugbear — catches real bug patterns (unchained exceptions, zip()
+# length mismatches, mutable default args) that E/F/W/I miss.
+select = ["E", "F", "W", "I", "B"]
+ignore = [
+    "E501",
+    "B008",  # Depends(...) in a default arg is the correct FastAPI idiom.
+]

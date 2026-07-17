@@ -90,7 +90,7 @@ async def collect_telemetry() -> dict[str, Any]:
     )
 
     telemetry: dict[str, Any] = {}
-    for collector, result in zip(collectors, results):
+    for collector, result in zip(collectors, results, strict=True):
         if isinstance(result, Exception):
             telemetry[collector.name] = {"error": str(result), "collector": collector.name}
         else:

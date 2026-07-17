@@ -216,9 +216,9 @@ def install_service() -> None:
         subprocess.run(["systemctl", "enable", "crashpilot"], check=True)
         console.print("[green]✓[/green] CrashPilot service installed and enabled.")
         console.print("Start with: [cyan]sudo systemctl start crashpilot[/cyan]")
-    except PermissionError:
+    except PermissionError as exc:
         console.print("[red]Permission denied — run with sudo[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from exc
 
 
 @app.command()
@@ -323,7 +323,7 @@ def configure(
         cfg_data = json.loads(decoded)
     except Exception as e:
         console.print(f"[red]Invalid connection string: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     required = ("url", "key", "system_id", "token")
     missing = [k for k in required if not cfg_data.get(k)]
@@ -478,7 +478,7 @@ def heartbeat(
         # Always surface the reason — for manual runs and for `journalctl` when
         # the timer fires. Detailed text comes from cloud_push._explain_http_error.
         console.print(f"[red]✗ Heartbeat failed:[/red] {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     if not quiet:
         console.print(
@@ -501,7 +501,7 @@ def snapshot(
         result = record_snapshot(deep=deep)
     except Exception as exc:
         console.print(f"[red]✗ Snapshot failed:[/red] {exc}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from exc
     if not quiet:
         console.print(
             "[green]✓ Flight recorder snapshot saved[/green] "
@@ -562,7 +562,7 @@ def update(
         result = install_latest(force=force)
     except Exception as exc:
         console.print(f"[red]✗ Agent update failed:[/red] {exc}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from exc
 
     if quiet:
         return

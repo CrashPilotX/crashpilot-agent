@@ -218,11 +218,11 @@ def _forecast(samples: list[dict], path: tuple[str, str], threshold: float) -> d
     denominator = sum((x - x_mean) ** 2 for x in xs)
     if denominator == 0:
         return None
-    slope = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys)) / denominator
+    slope = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys, strict=True)) / denominator
     if slope <= 0.05:
         return None
     fitted = [y_mean + slope * (x - x_mean) for x in xs]
-    residual = sum((actual - predicted) ** 2 for actual, predicted in zip(ys, fitted))
+    residual = sum((actual - predicted) ** 2 for actual, predicted in zip(ys, fitted, strict=True))
     total = sum((actual - y_mean) ** 2 for actual in ys)
     r_squared = 1 - (residual / total) if total else 0
     if r_squared < 0.55:
