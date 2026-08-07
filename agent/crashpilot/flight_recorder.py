@@ -43,7 +43,6 @@ def _top_processes(limit: int = 8) -> dict[str, list[dict[str, Any]]]:
             pid = info.get("pid")
             create_time = info.get("create_time")
             command = " ".join(info.get("cmdline") or [])[:300]
-            service = _process_service(pid)
             identity = "|".join([
                 str(pid or ""),
                 str(round(float(create_time), 3)) if create_time else "",
@@ -59,17 +58,21 @@ def _top_processes(limit: int = 8) -> dict[str, list[dict[str, Any]]]:
                     datetime.fromtimestamp(float(create_time), timezone.utc).isoformat()
                     if create_time else None
                 ),
-                "service": service,
                 "identity": identity,
                 "rss_mb": round((memory.rss if memory else 0) / 1024 / 1024, 1),
                 "cpu_pct": round(float(info.get("cpu_percent") or 0), 1),
             })
         except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             continue
-    return {
-        "memory": sorted(rows, key=lambda row: row["rss_mb"], reverse=True)[:limit],
-        "cpu": sorted(rows, key=lambda row: row["cpu_pct"], reverse=True)[:limit],
-    }
+    by_memory = sorted(rows, key=lambda row: row["rss_mb"], reverse=True)[:limit]
+    by_cpu = sorted(rows, key=lambda row: row["cpu_pct"], reverse=True)[:limit]
+    # Resolve the cgroup/service name (a /proc/<pid>/cgroup read per process)
+    # only for the small set of processes we're actually reporting, not for
+    # every process on the host — on a busy or shared box this can be the
+    # difference between ~16 file reads and several thousand every tick.
+    for row in {row["pid"]: row for row in (*by_memory, *by_cpu)}.values():
+        row["service"] = _process_service(row["pid"])
+    return {"memory": by_memory, "cpu": by_cpu}
 
 
 def _failed_services() -> list[dict[str, str]]:
@@ -101,10 +104,22 @@ def _failed_services() -> list[dict[str, str]]:
     return services
 
 
+_PACKAGE_HISTORY_TAIL_BYTES = 65_536
+
+
 def _recent_package_changes() -> list[str]:
     history = Path("/var/log/apt/history.log")
     try:
-        lines = history.read_text(encoding="utf-8", errors="replace").splitlines()
+        # apt's history.log grows unboundedly over a host's lifetime (can
+        # reach multiple MB); the entries we care about are always near the
+        # end, so read only a bounded tail instead of the whole file on
+        # every heartbeat tick.
+        size = history.stat().st_size
+        with history.open("rb") as f:
+            read_size = min(size, _PACKAGE_HISTORY_TAIL_BYTES)
+            f.seek(size - read_size)
+            raw = f.read()
+        lines = raw.decode("utf-8", errors="replace").splitlines()
     except OSError:
         return []
     relevant = [
@@ -160,7 +175,11 @@ def capture_snapshot(*, deep: bool = False) -> dict[str, Any]:
             "load_1m": round(load_1m, 2),
             "load_5m": round(load_5m, 2),
             "load_15m": round(load_15m, 2),
-            "used_pct": round(psutil.cpu_percent(interval=0.1), 1),
+            # interval=None reports usage since the last call (or module
+            # import) instead of blocking for interval=0.1 seconds — this
+            # runs on every heartbeat tick, so that sleep was a guaranteed
+            # 100ms stall each time for no accuracy benefit here.
+            "used_pct": round(psutil.cpu_percent(interval=None), 1),
         },
         "memory": {
             "used_pct": round(memory.percent, 1),

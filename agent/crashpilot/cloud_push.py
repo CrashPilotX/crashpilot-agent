@@ -8,6 +8,7 @@ RPCs in Postgres (so the anon key is safe to use here).
 
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import json
 import logging
@@ -72,6 +73,21 @@ _LIVE_DMESG_PATTERN = re.compile(
     ]),
     re.IGNORECASE,
 )
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write a cache file via a temp-file-plus-rename instead of a direct write.
+
+    Several of these caches (section TTLs, the daily egress tracker, network
+    counters) are rewritten on effectively every heartbeat tick. A direct
+    write() interrupted by a crash, OOM-kill, or power loss leaves a
+    truncated/corrupt file; the reader already treats that as a cache miss,
+    which silently forces extra work (re-running subprocess-based collectors)
+    more often than the TTL design intends. os.replace is atomic on POSIX.
+    """
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 def _headers(anon_key: str) -> dict[str, str]:
@@ -303,10 +319,7 @@ def _collect_speedtest_capacity() -> dict[str, Any] | None:
 
     if cache_path is not None:
         try:
-            cache_path.write_text(
-                json.dumps({"saved_at": time.time(), "result": result}),
-                encoding="utf-8",
-            )
+            _atomic_write_text(cache_path, json.dumps({"saved_at": time.time(), "result": result}))
         except OSError:
             pass
 
@@ -416,14 +429,11 @@ def _collect_network_usage() -> dict[str, Any]:
 
     if cache_path is not None:
         try:
-            cache_path.write_text(
-                json.dumps({
-                    "saved_at": now,
-                    "rx_bytes": counters["rx_bytes"],
-                    "tx_bytes": counters["tx_bytes"],
-                }),
-                encoding="utf-8",
-            )
+            _atomic_write_text(cache_path, json.dumps({
+                "saved_at": now,
+                "rx_bytes": counters["rx_bytes"],
+                "tx_bytes": counters["tx_bytes"],
+            }))
         except OSError:
             pass
 
@@ -464,10 +474,7 @@ def _save_live_dmesg_cache(path: Path | None, dmesg: dict[str, Any]) -> None:
     if path is None:
         return
     try:
-        path.write_text(
-            json.dumps({"saved_at": time.time(), "dmesg": dmesg}),
-            encoding="utf-8",
-        )
+        _atomic_write_text(path, json.dumps({"saved_at": time.time(), "dmesg": dmesg}))
     except OSError:
         return
 
@@ -511,20 +518,32 @@ def _collect_live_dmesg() -> dict[str, Any]:
     return dmesg
 
 
-def _systemctl_state(unit: str, verb: str) -> str | None:
+def _systemctl_unit_state(unit: str) -> tuple[str | None, str | None]:
+    """Return (active_state, enabled_state) for one unit via a single call.
+
+    `_build_agent_health` used to spend two `_systemctl_state` subprocess
+    spawns per unit (is-active, is-enabled) across three units — six spawns
+    every heartbeat tick. `systemctl show --property=` returns both in one
+    call per unit, so this halves that to three.
+    """
     if not shutil.which("systemctl"):
-        return None
+        return None, None
     try:
         result = subprocess.run(
-            ["systemctl", verb, unit],
+            ["systemctl", "show", unit, "--property=ActiveState,UnitFileState", "--no-pager"],
             check=False,
             capture_output=True,
             text=True,
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
-        return None
-    return (result.stdout or result.stderr).strip() or None
+        return None, None
+    values: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            values[key.strip()] = value.strip()
+    return values.get("ActiveState") or None, values.get("UnitFileState") or None
 
 
 
@@ -734,10 +753,7 @@ def _collect_hardware_profile() -> dict[str, Any]:
 
     if cache_path is not None:
         try:
-            cache_path.write_text(
-                json.dumps({"saved_at": time.time(), "profile": profile}),
-                encoding="utf-8",
-            )
+            _atomic_write_text(cache_path, json.dumps({"saved_at": time.time(), "profile": profile}))
         except OSError:
             pass
 
@@ -803,7 +819,7 @@ def _save_egress_tracker(path: Path | None, tracker: dict[str, Any]) -> None:
     if path is None:
         return
     try:
-        path.write_text(json.dumps(tracker), encoding="utf-8")
+        _atomic_write_text(path, json.dumps(tracker))
     except OSError:
         pass
 
@@ -982,7 +998,7 @@ def _save_section_ttl(path: Path | None, ttl: dict[str, float]) -> None:
     if path is None:
         return
     try:
-        path.write_text(json.dumps(ttl), encoding="utf-8")
+        _atomic_write_text(path, json.dumps(ttl))
     except OSError:
         pass
 
@@ -999,21 +1015,24 @@ def _mark_section_sent(section: str) -> None:
 
 def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
     """Small diagnostic payload shown in the dashboard health panel."""
+    timer_active, timer_enabled = _systemctl_unit_state("crashpilot-heartbeat.timer")
+    update_active, update_enabled = _systemctl_unit_state("crashpilot-update.timer")
+    snapshot_active, snapshot_enabled = _systemctl_unit_state("crashpilot-snapshot.timer")
     health: dict[str, Any] = {
         "collected_at": datetime.now(timezone.utc).isoformat(),
         "version": _agent_version(),
         "hostname": _hostname(),
         "timer": {
-            "active": _systemctl_state("crashpilot-heartbeat.timer", "is-active"),
-            "enabled": _systemctl_state("crashpilot-heartbeat.timer", "is-enabled"),
+            "active": timer_active,
+            "enabled": timer_enabled,
         },
         "update_timer": {
-            "active": _systemctl_state("crashpilot-update.timer", "is-active"),
-            "enabled": _systemctl_state("crashpilot-update.timer", "is-enabled"),
+            "active": update_active,
+            "enabled": update_enabled,
         },
         "snapshot_timer": {
-            "active": _systemctl_state("crashpilot-snapshot.timer", "is-active"),
-            "enabled": _systemctl_state("crashpilot-snapshot.timer", "is-enabled"),
+            "active": snapshot_active,
+            "enabled": snapshot_enabled,
         },
         "tools": {
             "systemctl": bool(shutil.which("systemctl")),
@@ -1326,7 +1345,13 @@ async def push_heartbeat(
         heartbeat_metrics = _build_minimal_heartbeat_metrics(bytes_used, hard_limit_bytes)
         live_metrics_due = False
     elif live_metrics_due:
-        heartbeat_metrics = _build_live_metrics(slim=slim_mode)
+        # _build_live_metrics does substantial synchronous work (subprocess
+        # calls for dmesg/hardware/systemctl, a flight-recorder snapshot, and
+        # — when its cache is stale — a speedtest-cli run with up to a 90s
+        # timeout). Run it off the event loop so a slow tick doesn't stall
+        # anything else this process is doing concurrently (e.g. the local
+        # API server) for the length of that call.
+        heartbeat_metrics = await asyncio.to_thread(_build_live_metrics, slim=slim_mode)
     else:
         heartbeat_metrics = _build_pulse_metrics(
             "slim" if slim_mode else "pulse",

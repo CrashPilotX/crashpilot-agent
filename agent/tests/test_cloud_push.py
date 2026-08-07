@@ -409,8 +409,8 @@ class TestPushHeartbeat:
         monkeypatch.setattr(cloud_push, "_hostname", lambda: "ci-host")
         monkeypatch.setattr(
             cloud_push,
-            "_systemctl_state",
-            lambda unit, verb: "active" if verb == "is-active" else "enabled",
+            "_systemctl_unit_state",
+            lambda unit: ("active", "enabled"),
         )
         monkeypatch.setattr(
             cloud_push.shutil,
