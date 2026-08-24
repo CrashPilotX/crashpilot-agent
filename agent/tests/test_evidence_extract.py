@@ -27,7 +27,7 @@ def test_extracts_bracketed_timestamp_from_dmesg_dash_t_line():
 
 
 def test_does_not_treat_dmesg_monotonic_time_as_a_wall_clock_timestamp():
-    # [12345.678901] is seconds-since-boot, not a date — must not be
+    # [12345.678901] is seconds-since-boot, not a date - must not be
     # reported as a timestamp (that would be fabricating a date).
     line = "[12345.678901] kswapd0: page allocation failure order=3"
     meta = extract_evidence_metadata(line)
@@ -43,3 +43,10 @@ def test_returns_none_for_all_fields_when_nothing_is_present():
     line = "Reached target Power-Off."
     meta = extract_evidence_metadata(line)
     assert meta == {"timestamp": None, "process": None, "pid": None}
+
+
+def test_does_not_misreport_hex_pid_as_a_truncated_decimal():
+    # \d+ would otherwise greedily stop at "0" in "0x1a2b" and report a
+    # misleading pid=0 instead of admitting this isn't decimal.
+    line = "GPU fault: pid=0x1a2b, engine=3d"
+    assert extract_pid(line) is None

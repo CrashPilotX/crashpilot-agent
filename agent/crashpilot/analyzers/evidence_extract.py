@@ -1,16 +1,16 @@
-"""Extract timestamp/process/PID from a raw log line — never invent one.
+"""Extract timestamp/process/PID from a raw log line - never invent one.
 
 Used to enrich heuristic evidence lines (crash_detector.py) with structured
 metadata the dashboard can display next to each piece of evidence. Every
 function here returns None when the source line doesn't contain the field in
-a recognizable form — callers must never substitute a guessed or computed
+a recognizable form - callers must never substitute a guessed or computed
 value, since the whole point is that evidence stays traceable to exactly what
 was in the log.
 
 Formats handled (matching what this agent's collectors actually produce):
   - journalctl --output=short-iso: "2026-06-15T03:12:44+0000 host proc[1234]: ..."
   - dmesg -T:                      "[Sun Jun 15 03:12:44 2026] ..."
-  - dmesg (no -T, monotonic):      "[12345.678901] ..." — NOT a wall-clock
+  - dmesg (no -T, monotonic):      "[12345.678901] ..." - NOT a wall-clock
     timestamp, so intentionally not extracted as one.
 """
 
@@ -28,13 +28,16 @@ _SYSLOG_TIMESTAMP_RE = re.compile(
     r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}"
 )
 
-# "process 1234 (name)" / "process 1234 (name)" — the kernel OOM-killer's own
+# "process 1234 (name)" / "process 1234 (name)" - the kernel OOM-killer's own
 # wording ("Killed process", "Kill process ... or sacrifice child").
 _PROCESS_PID_PAREN_RE = re.compile(r"process\s+(\d+)\s*\(([^)]+)\)", re.IGNORECASE)
-# "name invoked oom-killer" — process name appears before the phrase, no PID.
+# "name invoked oom-killer" - process name appears before the phrase, no PID.
 _INVOKED_OOM_RE = re.compile(r"^\s*(\S+)\s+invoked oom-killer", re.IGNORECASE)
 # GPU/driver style: "pid=1234" / "pid: 1234", optionally with "name=foo".
-_PID_KV_RE = re.compile(r"\bpid[=:]\s*(\d+)", re.IGNORECASE)
+# The trailing (?!x) rejects hex-formatted values like "pid=0x1a2b"  -
+# without it, \d+ greedily stops at "0" and silently reports a misleading
+# pid=0 instead of admitting this isn't a decimal PID we know how to parse.
+_PID_KV_RE = re.compile(r"\bpid[=:]\s*(\d+)(?!x)", re.IGNORECASE)
 _NAME_KV_RE = re.compile(r"\b(?:name|comm)[=:]\s*([^\s,)]+)", re.IGNORECASE)
 
 
@@ -71,7 +74,7 @@ def extract_process(line: str) -> str | None:
 
 
 def extract_evidence_metadata(line: str) -> dict[str, str | int | None]:
-    """Best-effort timestamp/process/PID for one evidence line — all three are
+    """Best-effort timestamp/process/PID for one evidence line - all three are
     None when not literally present in the text, never guessed."""
     return {
         "timestamp": extract_timestamp(line),

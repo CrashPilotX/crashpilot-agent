@@ -126,6 +126,30 @@ class TestCleanShutdown:
         result = detect_crash_type(tel)
         assert result.crash_type == CrashType.KERNEL_PANIC
 
+    def test_double_fault_overrides_clean_shutdown(self):
+        """A double/triple fault or MCE is also a real panic signature  -
+        _has_panic_patterns must recognize it too, not just 'kernel panic'/
+        'bug:'/'general protection fault', or a genuine panic followed by a
+        shutdown-target log line gets silently mislabeled as a clean exit."""
+        tel = _tel(
+            journal_errors=(
+                "kernel: double fault: 0000\n"
+                "systemd-shutdown: Shutting down"
+            )
+        )
+        result = detect_crash_type(tel)
+        assert result.crash_type == CrashType.KERNEL_PANIC
+
+    def test_mce_overrides_clean_shutdown(self):
+        tel = _tel(
+            journal_errors=(
+                "mcelog: Machine check exception: memory error\n"
+                "systemd-shutdown: Shutting down"
+            )
+        )
+        result = detect_crash_type(tel)
+        assert result.crash_type == CrashType.MCE
+
 
 class TestUnknownAndPowerLoss:
     def test_unknown_when_no_match(self):
@@ -193,6 +217,33 @@ class TestEvidenceSources:
         result = detect_crash_type(tel)
         assert result.evidence_sources
         assert all(source == "journal" for source in result.evidence_sources)
+
+    def test_prefers_specific_gpu_nvidia_source_over_generic_dmesg_for_overlapping_lines(self):
+        # The kernel ring buffer (dmesg) captures NVIDIA driver messages too,
+        # so the exact same line can legitimately appear in both dmesg.full_tail
+        # and gpu.nvidia.xid_errors. The more specific collector should win.
+        xid_line = "NVRM: Xid (PCI:0000:01:00): 79, pid=0, GPU-00000000, Channel 00000000"
+        tel = _tel(dmesg_tail=xid_line)
+        tel["gpu"]["nvidia"]["xid_errors"] = xid_line
+        result = detect_crash_type(tel)
+        assert result.crash_type == CrashType.GPU_FAULT
+        assert result.evidence_sources[0] == "gpu_nvidia"
+
+    def test_evidence_no_longer_duplicated_between_best_and_alternatives(self):
+        # Runner-up evidence used to be copied into best.evidence as
+        # "[secondary] <line>" AND kept unprefixed inside best.alternatives -
+        # the same line showing up twice under two different labels. Uses
+        # two crash-type patterns with no shared substrings, so any overlap
+        # in the result can only come from that old duplication path, not
+        # from one real line legitimately matching both pattern lists.
+        tel = _tel(
+            journal_errors="Out of memory: Killed process 1234 (python3)",
+            dmesg_tail="ACPI: Thermal Zone: critical temperature reached",
+        )
+        result = detect_crash_type(tel)
+        assert not any(e.startswith("[secondary]") for e in result.evidence)
+        alt_evidence = {e for alt in result.alternatives for e in alt["evidence"]}
+        assert not (set(result.evidence) & alt_evidence)
 
     def test_attributes_dmesg_line_to_dmesg(self):
         tel = _tel(dmesg_tail="Out of memory: Killed process 1234 (python3)")

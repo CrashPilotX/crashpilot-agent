@@ -1,4 +1,4 @@
-"""Heuristic crash type detection — runs before AI analysis."""
+"""Heuristic crash type detection - runs before AI analysis."""
 
 from __future__ import annotations
 
@@ -38,17 +38,17 @@ class DetectionResult:
     evidence: list[str] = field(default_factory=list)
     signals: dict[str, Any] = field(default_factory=dict)
     # Other crash-type patterns that also matched, but scored lower than the
-    # chosen result — real runner-up detections, not invented possibilities.
+    # chosen result - real runner-up detections, not invented possibilities.
     # Populated only when more than one rule matched (see detect_crash_type).
     alternatives: list[dict[str, Any]] = field(default_factory=list)
-    # Which collector each evidence[i] line actually came from — aligned by
+    # Which collector each evidence[i] line actually came from - aligned by
     # index. "system" means the line wasn't found verbatim in any collected
     # log chunk (e.g. a derived signal like "no shutdown record found"),
     # not a guess at a specific source.
     evidence_sources: list[str] = field(default_factory=list)
 
 
-# Heuristic rules — ordered by priority
+# Heuristic rules - ordered by priority
 _RULES: list[tuple[CrashType, Severity, list[str]]] = [
     (CrashType.KERNEL_PANIC, Severity.CRITICAL, [
         r"Kernel panic",
@@ -164,14 +164,12 @@ def detect_crash_type(telemetry: dict[str, Any]) -> DetectionResult:
         all_matches.sort(key=lambda r: (-r.confidence, severity_rank[r.severity]))
         best = all_matches[0]
         best.evidence_sources = [_line_source(line_sources, e) for e in best.evidence]
-        # Collect signals from other matches
-        for other in all_matches[1:]:
-            secondary = [f"[secondary] {e}" for e in other.evidence[:2]]
-            best.evidence.extend(secondary)
-            best.evidence_sources.extend(_line_source(line_sources, e) for e in secondary)
-        # Real runner-up detections — each one genuinely matched its own
+        # Real runner-up detections - each one genuinely matched its own
         # pattern set with its own evidence and confidence, just lower than
-        # `best`. Surfaced as alternative hypotheses rather than discarded.
+        # `best`. Surfaced as structured alternative hypotheses (see
+        # alternatives below) instead of being duplicated into best.evidence
+        # as "[secondary] ..." text, which used to show the same line twice
+        # under two different labels.
         best.alternatives = [
             {
                 "crash_type": other.crash_type.value,
@@ -182,7 +180,7 @@ def detect_crash_type(telemetry: dict[str, Any]) -> DetectionResult:
         ]
         return best
 
-    # No pattern matched — power loss or unknown
+    # No pattern matched - power loss or unknown
     result = _infer_power_loss_or_unknown(telemetry)
     result.evidence_sources = [_line_source(line_sources, e) for e in result.evidence]
     return result
@@ -190,20 +188,25 @@ def detect_crash_type(telemetry: dict[str, Any]) -> DetectionResult:
 
 def _line_source_map(telemetry: dict) -> dict[str, str]:
     """Map each distinct log line to the collector it came from, so a
-    heuristic evidence line (just matched text — see _match_patterns) can be
+    heuristic evidence line (just matched text - see _match_patterns) can be
     honestly attributed to a real source instead of left unlabeled."""
     sources: dict[str, str] = {}
     journal = telemetry.get("journal", {})
     dmesg = telemetry.get("dmesg", {})
     gpu = telemetry.get("gpu", {})
+    # Ordered most- to least-specific collector: NVIDIA driver lines often
+    # appear in dmesg's own tail too (the kernel ring buffer captures
+    # everything), so a duplicate line should be attributed to the specific
+    # gpu_nvidia collector rather than the generic dmesg catch-all. First
+    # match wins below, so check gpu_nvidia before dmesg/journal.
     chunks = (
-        ("journal", journal.get("previous_boot_errors", "")),
-        ("journal", journal.get("previous_boot_logs_tail", "")[-10000:]),
-        ("journal", journal.get("oom_events", "")),
+        ("gpu_nvidia", gpu.get("nvidia", {}).get("xid_errors", "")),
         ("dmesg", dmesg.get("full_tail", "")[-10000:]),
         ("dmesg", "\n".join(dmesg.get("critical_events", []))),
         ("dmesg", dmesg.get("mce_events", "")),
-        ("gpu_nvidia", gpu.get("nvidia", {}).get("xid_errors", "")),
+        ("journal", journal.get("previous_boot_errors", "")),
+        ("journal", journal.get("previous_boot_logs_tail", "")[-10000:]),
+        ("journal", journal.get("oom_events", "")),
     )
     for source, text in chunks:
         for line in text.splitlines():
@@ -214,8 +217,8 @@ def _line_source_map(telemetry: dict) -> dict[str, str]:
 
 
 def _line_source(line_sources: dict[str, str], evidence_line: str) -> str:
-    """Look up a real source for an evidence line, or "system" — an honest
-    "not a specific collector" label — if it's a derived signal rather than
+    """Look up a real source for an evidence line, or "system" - an honest
+    "not a specific collector" label - if it's a derived signal rather than
     text found verbatim in a collected log."""
     line = evidence_line.removeprefix("[secondary] ").strip()
     return line_sources.get(line, "system")
@@ -249,14 +252,22 @@ def _match_patterns(label: str, corpus: str, patterns: list[str]) -> list[str]:
             end = corpus.find("\n", match.end())
             if end == -1:
                 end = len(corpus)
-            line = corpus[start:end].strip()
+            line = corpus[start:end].strip()[:200]
             if line and line not in hits:
-                hits.append(line[:200])
+                hits.append(line)
     return hits
 
 
 def _has_panic_patterns(lower_corpus: str) -> bool:
-    return any(p in lower_corpus for p in ["kernel panic", "bug:", "general protection fault"])
+    # Must cover every KERNEL_PANIC/MCE pattern from _RULES above - otherwise
+    # a real panic whose corpus also happens to contain a shutdown-target
+    # line (e.g. a watchdog-forced reboot right after a double fault) gets
+    # silently reclassified as CLEAN_SHUTDOWN instead of the actual panic.
+    return any(p in lower_corpus for p in [
+        "kernel panic", "bug:", "general protection fault",
+        "double fault", "triple fault",
+        "machine check exception", "mce:", "mcelog",
+    ])
 
 
 def _enrich_with_hardware(results: list[DetectionResult], telemetry: dict) -> None:

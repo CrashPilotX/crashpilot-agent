@@ -82,6 +82,35 @@ async def test_analyze_crash_falls_back_when_response_has_no_text(monkeypatch, t
     assert result["ai_error"] == "Anthropic response contained no text content"
 
 
+@pytest.mark.asyncio
+async def test_analyze_crash_normalizes_explicit_null_alternative_hypotheses(monkeypatch, tmp_path):
+    # setdefault is a no-op when the key is already present, so a model that
+    # returns "alternative_hypotheses": null (valid JSON, not omitted) needs
+    # its own check, or callers that assume an array would break.
+    monkeypatch.setenv("CRASHPILOT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("CRASHPILOT_DB_PATH", str(tmp_path / "crashpilot.db"))
+    monkeypatch.setenv("CRASHPILOT_ANTHROPIC_API_KEY", "test-key")
+
+    content = [
+        SimpleNamespace(
+            type="text",
+            text=(
+                '{"root_cause":"OOM","crash_type":"oom_kill","severity":"high",'
+                '"confidence":0.9,"alternative_hypotheses":null}'
+            ),
+        ),
+    ]
+    monkeypatch.setattr(ai_analyzer, "_get_client", lambda _key: _Client(content))
+
+    result = await ai_analyzer.analyze_crash(
+        telemetry={},
+        detection_result={"crash_type": "oom_kill", "severity": "high", "confidence": 0.8},
+        timeline=[],
+    )
+
+    assert result["alternative_hypotheses"] == []
+
+
 class TestNoApiKeyResultEvidence:
     def test_evidence_carries_real_source_and_extracted_metadata(self):
         detection = {

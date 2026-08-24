@@ -11,7 +11,7 @@ import anthropic
 from ..config import get_settings
 
 # ---------------------------------------------------------------------------
-# Async client — instantiated lazily so it's never created during import
+# Async client - instantiated lazily so it's never created during import
 # ---------------------------------------------------------------------------
 _async_client: anthropic.AsyncAnthropic | None = None
 
@@ -40,7 +40,7 @@ You analyze telemetry evidence collected immediately after an abnormal event:
 - Windows Event Log (WSL environments via PowerShell interop)
 
 PLATFORM-SPECIFIC AWARENESS:
-- WSL1: No kernel — crashes are Windows host issues. Analyze Windows Event Log data.
+- WSL1: No kernel - crashes are Windows host issues. Analyze Windows Event Log data.
 - WSL2: Has a kernel but no ACPI/hardware sensors. OOM is often .wslconfig memory limit.
 - Docker/Kubernetes: distinguish container-local evidence from mounted host evidence.
 - Non-Ubuntu distros are out of scope for now.
@@ -48,62 +48,62 @@ PLATFORM-SPECIFIC AWARENESS:
 Your analysis must be:
 1. EVIDENCE-BASED: Every conclusion must cite specific log lines or metrics
 2. PLATFORM-AWARE: Tailor analysis to the detected platform (Ubuntu Linux or Ubuntu WSL)
-3. CALIBRATED: Assign realistic confidence scores (0.0-1.0) — be honest about uncertainty
+3. CALIBRATED: Assign realistic confidence scores (0.0-1.0) - be honest about uncertainty
 4. ACTIONABLE: Provide concrete remediation steps ranked by priority
 5. CONCISE: Infrastructure engineers need fast answers, not essays
 6. TRACEABLE: for each evidence item, set timestamp/process/pid to the exact
    value from that log line's text if and only if it literally appears there.
-   Use null for any of these you cannot find verbatim in the excerpt — never
+   Use null for any of these you cannot find verbatim in the excerpt - never
    compute, estimate, or infer a timestamp/PID/process name that isn't
    actually printed in the log line you're citing.
 7. HONEST ABOUT ALTERNATIVES: when your confidence in root_cause is below
    0.8, populate alternative_hypotheses with other explanations the evidence
    doesn't rule out, and say concretely what evidence would confirm or rule
-   out each one. When confidence is 0.8 or higher, return an empty array —
+   out each one. When confidence is 0.8 or higher, return an empty array -
    do not invent alternatives just to fill the field.
 
 You respond ONLY with valid JSON matching the specified schema.
 """).strip()
 
 ANALYSIS_SCHEMA = {
-    "root_cause": "string — one sentence answer to 'why did this machine crash?'",
-    "crash_type": "string — kernel_panic|oom_kill|thermal_shutdown|power_loss|watchdog_reset|gpu_fault|disk_error|machine_check_exception|soft_lockup|clean_shutdown|unknown",
-    "severity": "string — critical|high|medium|low|info",
-    "confidence": "float 0.0-1.0 — your confidence in root_cause",
-    "summary": "string — 2-3 sentence executive summary for a sysadmin",
+    "root_cause": "string - one sentence answer to 'why did this machine crash?'",
+    "crash_type": "string - kernel_panic|oom_kill|thermal_shutdown|power_loss|watchdog_reset|gpu_fault|disk_error|machine_check_exception|soft_lockup|clean_shutdown|unknown",
+    "severity": "string - critical|high|medium|low|info",
+    "confidence": "float 0.0-1.0 - your confidence in root_cause",
+    "summary": "string - 2-3 sentence executive summary for a sysadmin",
     "timeline": [
         {
             "timestamp": "ISO-8601 or null",
-            "event": "string — what happened",
-            "significance": "string — why this matters",
+            "event": "string - what happened",
+            "significance": "string - why this matters",
         }
     ],
     "evidence": [
         {
-            "source": "string — journal|dmesg|smart|gpu|thermal|system",
-            "excerpt": "string — exact log line or metric value, verbatim",
-            "interpretation": "string — why this specific excerpt supports root_cause",
-            "weight": "float 0.0-1.0 — how strongly this supports root_cause",
-            "timestamp": "string or null — copied verbatim from the excerpt if present, else null",
-            "process": "string or null — process/service name copied verbatim from the excerpt if present, else null",
-            "pid": "integer or null — PID copied verbatim from the excerpt if present, else null",
+            "source": "string - journal|dmesg|smart|gpu|thermal|system",
+            "excerpt": "string - exact log line or metric value, verbatim",
+            "interpretation": "string - why this specific excerpt supports root_cause",
+            "weight": "float 0.0-1.0 - how strongly this supports root_cause",
+            "timestamp": "string or null - copied verbatim from the excerpt if present, else null",
+            "process": "string or null - process/service name copied verbatim from the excerpt if present, else null",
+            "pid": "integer or null - PID copied verbatim from the excerpt if present, else null",
         }
     ],
-    "contributing_factors": ["string — additional issues that may have contributed"],
+    "contributing_factors": ["string - additional issues that may have contributed"],
     "remediation": [
         {
             "priority": "integer 1-5 (1=most urgent)",
-            "action": "string — specific command or step",
-            "rationale": "string — why this fixes or prevents the issue",
+            "action": "string - specific command or step",
+            "rationale": "string - why this fixes or prevents the issue",
         }
     ],
-    "monitoring_suggestions": ["string — metrics or alerts to set up"],
-    "confidence_explanation": "string — explain what would increase or decrease your confidence",
+    "monitoring_suggestions": ["string - metrics or alerts to set up"],
+    "confidence_explanation": "string - explain what would increase or decrease your confidence",
     "alternative_hypotheses": [
         {
-            "hypothesis": "string — a different plausible root cause the evidence doesn't fully rule out",
-            "why_less_likely": "string — why this is less likely than root_cause given the evidence",
-            "confidence": "float 0.0-1.0 — your confidence in this alternative specifically",
+            "hypothesis": "string - a different plausible root cause the evidence doesn't fully rule out",
+            "why_less_likely": "string - why this is less likely than root_cause given the evidence",
+            "confidence": "float 0.0-1.0 - your confidence in this alternative specifically",
         }
     ],
 }
@@ -155,6 +155,7 @@ async def analyze_crash(
     Severity: {detection_result.get("severity", "unknown")}
     Heuristic confidence: {detection_result.get("confidence", 0):.0%}
     Initial evidence: {json.dumps(detection_result.get("evidence", []), indent=2)}
+    Competing heuristic matches (patterns that also matched, but scored lower): {json.dumps(detection_result.get("alternatives", []), indent=2)}
 
     ## Preliminary Timeline ({len(timeline)} events)
     {json.dumps(timeline[:30], indent=2)}
@@ -194,7 +195,12 @@ async def analyze_crash(
         analysis.setdefault("crash_type", detection_result.get("crash_type", "unknown"))
         analysis.setdefault("severity", detection_result.get("severity", "unknown"))
         analysis.setdefault("confidence", detection_result.get("confidence", 0.3))
-        analysis.setdefault("alternative_hypotheses", [])
+        # setdefault alone doesn't help if Claude returns an explicit JSON
+        # null for this key (valid JSON, key present) rather than omitting
+        # it - normalize that to an empty list too, since callers treat
+        # alternative_hypotheses as always being an array.
+        if analysis.get("alternative_hypotheses") is None:
+            analysis["alternative_hypotheses"] = []
         analysis["ai_analyzed"] = True
         analysis["model"] = cfg.claude_model
         analysis["usage"] = {
@@ -237,7 +243,7 @@ def _build_heuristic_evidence(detection: dict) -> list[dict[str, Any]]:
 
     Every field here comes directly from crash_detector.py's pattern match
     (the source collector) or evidence_extract.py's regex extraction (the
-    line's own text) — nothing is computed or guessed.
+    line's own text) - nothing is computed or guessed.
     """
     from .evidence_extract import extract_evidence_metadata
 
@@ -261,7 +267,7 @@ def _build_heuristic_evidence(detection: dict) -> list[dict[str, Any]]:
 
 def _build_heuristic_alternatives(detection: dict) -> list[dict[str, Any]]:
     """Surface the heuristic engine's own runner-up matches as alternative
-    hypotheses — real competing detections with their own confidence and
+    hypotheses - real competing detections with their own confidence and
     evidence (see crash_detector.detect_crash_type), not invented options.
     Only returned when the primary detection's confidence isn't already high.
     """
@@ -279,7 +285,7 @@ def _build_heuristic_alternatives(detection: dict) -> list[dict[str, Any]]:
                 f"Matched {len(evidence_lines)} pattern(s) for {alt_type} "
                 f"with {alt_confidence:.0%} heuristic confidence, versus "
                 f"{main_confidence:.0%} for the selected root cause"
-                + (f" — e.g. \"{evidence_lines[0]}\"" if evidence_lines else "") + "."
+                + (f" - e.g. \"{evidence_lines[0]}\"" if evidence_lines else "") + "."
             ),
             "confidence": alt_confidence,
         })
