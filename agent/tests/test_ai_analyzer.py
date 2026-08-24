@@ -80,3 +80,66 @@ async def test_analyze_crash_falls_back_when_response_has_no_text(monkeypatch, t
 
     assert result["ai_analyzed"] is False
     assert result["ai_error"] == "Anthropic response contained no text content"
+
+
+class TestNoApiKeyResultEvidence:
+    def test_evidence_carries_real_source_and_extracted_metadata(self):
+        detection = {
+            "crash_type": "oom_kill",
+            "severity": "high",
+            "confidence": 0.7,
+            "evidence": ["Out of memory: Kill process 38291 (torch_train) score 923"],
+            "evidence_sources": ["journal"],
+            "alternatives": [],
+        }
+        result = ai_analyzer._no_api_key_result(detection)
+        assert result["evidence"] == [{
+            "source": "journal",
+            "excerpt": "Out of memory: Kill process 38291 (torch_train) score 923",
+            "interpretation": "",
+            "weight": 0.5,
+            "timestamp": None,
+            "process": "torch_train",
+            "pid": 38291,
+        }]
+
+    def test_evidence_source_falls_back_to_system_when_missing(self):
+        detection = {
+            "crash_type": "unknown",
+            "confidence": 0.3,
+            "evidence": ["No clear crash signature detected"],
+            "evidence_sources": [],
+            "alternatives": [],
+        }
+        result = ai_analyzer._no_api_key_result(detection)
+        assert result["evidence"][0]["source"] == "system"
+
+
+class TestNoApiKeyResultAlternatives:
+    def test_no_alternatives_when_confidence_is_high(self):
+        detection = {
+            "crash_type": "oom_kill",
+            "confidence": 0.9,
+            "evidence": [],
+            "evidence_sources": [],
+            "alternatives": [{"crash_type": "disk_error", "confidence": 0.4, "evidence": ["x"]}],
+        }
+        result = ai_analyzer._no_api_key_result(detection)
+        assert result["alternative_hypotheses"] == []
+
+    def test_surfaces_real_alternatives_when_confidence_is_not_high(self):
+        detection = {
+            "crash_type": "soft_lockup",
+            "confidence": 0.7,
+            "evidence": [],
+            "evidence_sources": [],
+            "alternatives": [
+                {"crash_type": "watchdog_reset", "confidence": 0.6, "evidence": ["watchdog: BUG"]},
+            ],
+        }
+        result = ai_analyzer._no_api_key_result(detection)
+        assert len(result["alternative_hypotheses"]) == 1
+        alt = result["alternative_hypotheses"][0]
+        assert "watchdog reset" in alt["hypothesis"]
+        assert alt["confidence"] == 0.6
+        assert "watchdog: BUG" in alt["why_less_likely"]

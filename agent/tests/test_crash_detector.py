@@ -185,3 +185,61 @@ class TestMatchPatterns:
         long_line = "A" * 300
         hits = _match_patterns("test", long_line, [r"AAA"])
         assert all(len(h) <= 200 for h in hits)
+
+
+class TestEvidenceSources:
+    def test_attributes_journal_line_to_journal(self):
+        tel = _tel(journal_errors="Out of memory: Killed process 1234 (python3)")
+        result = detect_crash_type(tel)
+        assert result.evidence_sources
+        assert all(source == "journal" for source in result.evidence_sources)
+
+    def test_attributes_dmesg_line_to_dmesg(self):
+        tel = _tel(dmesg_tail="Out of memory: Killed process 1234 (python3)")
+        result = detect_crash_type(tel)
+        assert result.evidence_sources
+        assert all(source == "dmesg" for source in result.evidence_sources)
+
+    def test_derived_signal_gets_system_source(self):
+        # No boots/shutdown info in this fixture -> falls through to the
+        # power-loss/unknown path, whose evidence is a synthesized sentence,
+        # not a line from any collected log.
+        tel = _tel()
+        tel["journal"]["boots"] = [
+            {"boot_id": "aaa"}, {"boot_id": "bbb"},
+        ]
+        tel["journal"]["shutdown_info"] = ""
+        result = detect_crash_type(tel)
+        assert result.evidence_sources == ["system"] * len(result.evidence)
+
+    def test_evidence_and_evidence_sources_stay_aligned(self):
+        tel = _tel(
+            journal_errors="Out of memory: Killed process 1234 (python3)",
+            dmesg_tail="Kernel panic - not syncing: VFS",
+        )
+        result = detect_crash_type(tel)
+        assert len(result.evidence) == len(result.evidence_sources)
+
+
+class TestAlternatives:
+    def test_no_alternatives_when_only_one_pattern_matches(self):
+        tel = _tel(journal_errors="Out of memory: Killed process 1234 (python3)")
+        result = detect_crash_type(tel)
+        assert result.alternatives == []
+
+    def test_surfaces_real_runner_up_when_multiple_patterns_match(self):
+        tel = _tel(
+            dmesg_tail=(
+                "soft lockup - CPU#2 stuck for 23s\n"
+                "watchdog: BUG: soft lockup detected on CPU#2"
+            ),
+        )
+        result = detect_crash_type(tel)
+        # Both soft_lockup and watchdog_reset patterns match this text -
+        # whichever wasn't chosen as `best` must show up as a real alternative
+        # with its own crash_type/confidence/evidence, not an invented one.
+        assert result.alternatives
+        alt = result.alternatives[0]
+        assert alt["crash_type"] != result.crash_type.value
+        assert 0 <= alt["confidence"] <= 1
+        assert alt["evidence"]

@@ -164,7 +164,9 @@ async def check_and_analyze(force: bool = False) -> dict | None:
         "severity": detection.severity.value,
         "confidence": detection.confidence,
         "evidence": detection.evidence,
+        "evidence_sources": detection.evidence_sources,
         "signals": detection.signals,
+        "alternatives": detection.alternatives,
         "platform": ptype,
     }
     forensic_snapshot = build_forensic_snapshot(telemetry, detection_payload, timeline)

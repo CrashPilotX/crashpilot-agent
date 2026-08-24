@@ -51,6 +51,16 @@ Your analysis must be:
 3. CALIBRATED: Assign realistic confidence scores (0.0-1.0) — be honest about uncertainty
 4. ACTIONABLE: Provide concrete remediation steps ranked by priority
 5. CONCISE: Infrastructure engineers need fast answers, not essays
+6. TRACEABLE: for each evidence item, set timestamp/process/pid to the exact
+   value from that log line's text if and only if it literally appears there.
+   Use null for any of these you cannot find verbatim in the excerpt — never
+   compute, estimate, or infer a timestamp/PID/process name that isn't
+   actually printed in the log line you're citing.
+7. HONEST ABOUT ALTERNATIVES: when your confidence in root_cause is below
+   0.8, populate alternative_hypotheses with other explanations the evidence
+   doesn't rule out, and say concretely what evidence would confirm or rule
+   out each one. When confidence is 0.8 or higher, return an empty array —
+   do not invent alternatives just to fill the field.
 
 You respond ONLY with valid JSON matching the specified schema.
 """).strip()
@@ -71,9 +81,12 @@ ANALYSIS_SCHEMA = {
     "evidence": [
         {
             "source": "string — journal|dmesg|smart|gpu|thermal|system",
-            "excerpt": "string — exact log line or metric value",
-            "interpretation": "string — what this tells us",
+            "excerpt": "string — exact log line or metric value, verbatim",
+            "interpretation": "string — why this specific excerpt supports root_cause",
             "weight": "float 0.0-1.0 — how strongly this supports root_cause",
+            "timestamp": "string or null — copied verbatim from the excerpt if present, else null",
+            "process": "string or null — process/service name copied verbatim from the excerpt if present, else null",
+            "pid": "integer or null — PID copied verbatim from the excerpt if present, else null",
         }
     ],
     "contributing_factors": ["string — additional issues that may have contributed"],
@@ -86,6 +99,13 @@ ANALYSIS_SCHEMA = {
     ],
     "monitoring_suggestions": ["string — metrics or alerts to set up"],
     "confidence_explanation": "string — explain what would increase or decrease your confidence",
+    "alternative_hypotheses": [
+        {
+            "hypothesis": "string — a different plausible root cause the evidence doesn't fully rule out",
+            "why_less_likely": "string — why this is less likely than root_cause given the evidence",
+            "confidence": "float 0.0-1.0 — your confidence in this alternative specifically",
+        }
+    ],
 }
 
 
@@ -174,6 +194,7 @@ async def analyze_crash(
         analysis.setdefault("crash_type", detection_result.get("crash_type", "unknown"))
         analysis.setdefault("severity", detection_result.get("severity", "unknown"))
         analysis.setdefault("confidence", detection_result.get("confidence", 0.3))
+        analysis.setdefault("alternative_hypotheses", [])
         analysis["ai_analyzed"] = True
         analysis["model"] = cfg.claude_model
         analysis["usage"] = {
@@ -210,6 +231,61 @@ def _extract_json(text: str) -> str:
     return text
 
 
+def _build_heuristic_evidence(detection: dict) -> list[dict[str, Any]]:
+    """Turn raw matched log lines into evidence objects with real source
+    attribution and any timestamp/process/PID the line itself contains.
+
+    Every field here comes directly from crash_detector.py's pattern match
+    (the source collector) or evidence_extract.py's regex extraction (the
+    line's own text) — nothing is computed or guessed.
+    """
+    from .evidence_extract import extract_evidence_metadata
+
+    lines = detection.get("evidence", [])[:5]
+    sources = detection.get("evidence_sources", [])
+    items = []
+    for i, line in enumerate(lines):
+        source = sources[i] if i < len(sources) else "system"
+        meta = extract_evidence_metadata(line)
+        items.append({
+            "source": source,
+            "excerpt": line,
+            "interpretation": "",
+            "weight": 0.5,
+            "timestamp": meta["timestamp"],
+            "process": meta["process"],
+            "pid": meta["pid"],
+        })
+    return items
+
+
+def _build_heuristic_alternatives(detection: dict) -> list[dict[str, Any]]:
+    """Surface the heuristic engine's own runner-up matches as alternative
+    hypotheses — real competing detections with their own confidence and
+    evidence (see crash_detector.detect_crash_type), not invented options.
+    Only returned when the primary detection's confidence isn't already high.
+    """
+    if detection.get("confidence", 0) >= 0.8:
+        return []
+    main_confidence = detection.get("confidence", 0)
+    alternatives = []
+    for alt in detection.get("alternatives", [])[:3]:
+        alt_type = str(alt.get("crash_type", "unknown")).replace("_", " ")
+        alt_confidence = alt.get("confidence", 0)
+        evidence_lines = alt.get("evidence") or []
+        alternatives.append({
+            "hypothesis": f"Could instead be {alt_type}",
+            "why_less_likely": (
+                f"Matched {len(evidence_lines)} pattern(s) for {alt_type} "
+                f"with {alt_confidence:.0%} heuristic confidence, versus "
+                f"{main_confidence:.0%} for the selected root cause"
+                + (f" — e.g. \"{evidence_lines[0]}\"" if evidence_lines else "") + "."
+            ),
+            "confidence": alt_confidence,
+        })
+    return alternatives
+
+
 def _no_api_key_result(detection: dict) -> dict:
     """Build a genuinely useful result from heuristics alone (no API key needed).
 
@@ -232,8 +308,8 @@ def _no_api_key_result(detection: dict) -> dict:
             f"(heuristic detection, {confidence:.0%} confidence). "
             "Set CRASHPILOT_ANTHROPIC_API_KEY for an evidence-weighted AI deep-dive."
         ),
-        "evidence": [{"source": e, "excerpt": e, "interpretation": "", "weight": 0.5}
-                     for e in detection.get("evidence", [])[:5]],
+        "evidence": _build_heuristic_evidence(detection),
+        "alternative_hypotheses": _build_heuristic_alternatives(detection),
         "timeline": [],
         "contributing_factors": advice.get("contributing_factors", []),
         "remediation": advice.get("remediation", []),

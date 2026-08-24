@@ -37,6 +37,15 @@ class DetectionResult:
     confidence: float  # 0-1
     evidence: list[str] = field(default_factory=list)
     signals: dict[str, Any] = field(default_factory=dict)
+    # Other crash-type patterns that also matched, but scored lower than the
+    # chosen result — real runner-up detections, not invented possibilities.
+    # Populated only when more than one rule matched (see detect_crash_type).
+    alternatives: list[dict[str, Any]] = field(default_factory=list)
+    # Which collector each evidence[i] line actually came from — aligned by
+    # index. "system" means the line wasn't found verbatim in any collected
+    # log chunk (e.g. a derived signal like "no shutdown record found"),
+    # not a guess at a specific source.
+    evidence_sources: list[str] = field(default_factory=list)
 
 
 # Heuristic rules — ordered by priority
@@ -113,6 +122,7 @@ def detect_crash_type(telemetry: dict[str, Any]) -> DetectionResult:
     # Aggregate all text evidence
     text_corpus = _build_corpus(telemetry)
     lower_corpus = text_corpus.lower()
+    line_sources = _line_source_map(telemetry)
 
     # Check clean shutdown first
     shutdown_hits = _match_patterns(CrashType.CLEAN_SHUTDOWN.value, text_corpus, _RULES[-1][2])
@@ -122,6 +132,7 @@ def detect_crash_type(telemetry: dict[str, Any]) -> DetectionResult:
             severity=Severity.INFO,
             confidence=0.85,
             evidence=shutdown_hits,
+            evidence_sources=[_line_source(line_sources, e) for e in shutdown_hits],
         )
 
     # Run through prioritized rules
@@ -152,13 +163,62 @@ def detect_crash_type(telemetry: dict[str, Any]) -> DetectionResult:
         }
         all_matches.sort(key=lambda r: (-r.confidence, severity_rank[r.severity]))
         best = all_matches[0]
+        best.evidence_sources = [_line_source(line_sources, e) for e in best.evidence]
         # Collect signals from other matches
         for other in all_matches[1:]:
-            best.evidence.extend([f"[secondary] {e}" for e in other.evidence[:2]])
+            secondary = [f"[secondary] {e}" for e in other.evidence[:2]]
+            best.evidence.extend(secondary)
+            best.evidence_sources.extend(_line_source(line_sources, e) for e in secondary)
+        # Real runner-up detections — each one genuinely matched its own
+        # pattern set with its own evidence and confidence, just lower than
+        # `best`. Surfaced as alternative hypotheses rather than discarded.
+        best.alternatives = [
+            {
+                "crash_type": other.crash_type.value,
+                "confidence": other.confidence,
+                "evidence": other.evidence[:3],
+            }
+            for other in all_matches[1:]
+        ]
         return best
 
     # No pattern matched — power loss or unknown
-    return _infer_power_loss_or_unknown(telemetry)
+    result = _infer_power_loss_or_unknown(telemetry)
+    result.evidence_sources = [_line_source(line_sources, e) for e in result.evidence]
+    return result
+
+
+def _line_source_map(telemetry: dict) -> dict[str, str]:
+    """Map each distinct log line to the collector it came from, so a
+    heuristic evidence line (just matched text — see _match_patterns) can be
+    honestly attributed to a real source instead of left unlabeled."""
+    sources: dict[str, str] = {}
+    journal = telemetry.get("journal", {})
+    dmesg = telemetry.get("dmesg", {})
+    gpu = telemetry.get("gpu", {})
+    chunks = (
+        ("journal", journal.get("previous_boot_errors", "")),
+        ("journal", journal.get("previous_boot_logs_tail", "")[-10000:]),
+        ("journal", journal.get("oom_events", "")),
+        ("dmesg", dmesg.get("full_tail", "")[-10000:]),
+        ("dmesg", "\n".join(dmesg.get("critical_events", []))),
+        ("dmesg", dmesg.get("mce_events", "")),
+        ("gpu_nvidia", gpu.get("nvidia", {}).get("xid_errors", "")),
+    )
+    for source, text in chunks:
+        for line in text.splitlines():
+            stripped = line.strip()[:200]
+            if stripped and stripped not in sources:
+                sources[stripped] = source
+    return sources
+
+
+def _line_source(line_sources: dict[str, str], evidence_line: str) -> str:
+    """Look up a real source for an evidence line, or "system" — an honest
+    "not a specific collector" label — if it's a derived signal rather than
+    text found verbatim in a collected log."""
+    line = evidence_line.removeprefix("[secondary] ").strip()
+    return line_sources.get(line, "system")
 
 
 def _build_corpus(telemetry: dict) -> str:
