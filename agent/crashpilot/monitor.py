@@ -32,6 +32,7 @@ from .collectors.system import SystemCollector
 from .collectors.thermal import ThermalCollector
 from .collectors.wsl import WslCollector
 from .config import get_settings
+from .redaction import redact_telemetry
 from .storage.store import (
     cleanup_old_reports,
     get_meta,
@@ -126,6 +127,26 @@ async def check_and_analyze(force: bool = False) -> dict | None:
     log.info("Collecting platform telemetry...")
     telemetry = await collect_telemetry()
 
+    try:
+        from .flight_recorder import summarize_window
+
+        telemetry["flight_recorder"] = summarize_window(hours=1)
+    except Exception as exc:
+        telemetry["flight_recorder"] = {"error": str(exc)}
+
+    # Redact secret-looking text (API keys, tokens, passwords, private keys)
+    # before anything else touches telemetry - crash detection, the AI
+    # prompt, the forensic snapshot, and cloud storage all read from this
+    # same dict afterward, so redacting it here is the single point that
+    # keeps a credential from ever reaching any of them.
+    telemetry, redaction_summary = redact_telemetry(telemetry)
+    if redaction_summary["count"]:
+        log.warning(
+            "Redacted %d potential secret(s) from telemetry before analysis: %s",
+            redaction_summary["count"],
+            ", ".join(redaction_summary["categories"]),
+        )
+
     platform = telemetry.get("platform", {})
     ptype = platform.get("type", "unknown")
 
@@ -150,13 +171,6 @@ async def check_and_analyze(force: bool = False) -> dict | None:
         detection.severity.value,
         detection.confidence * 100,
     )
-
-    try:
-        from .flight_recorder import summarize_window
-
-        telemetry["flight_recorder"] = summarize_window(hours=1)
-    except Exception as exc:
-        telemetry["flight_recorder"] = {"error": str(exc)}
 
     timeline = build_timeline(telemetry)
     detection_payload = {
@@ -194,6 +208,7 @@ async def check_and_analyze(force: bool = False) -> dict | None:
             },
             "timeline": timeline,
             "forensic_snapshot": forensic_snapshot,
+            "redaction": redaction_summary,
             "ai_analyzed": False,
         },
     }

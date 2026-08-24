@@ -331,6 +331,13 @@ def configure(
         console.print(f"[red]Connection string missing fields: {missing}[/red]")
         raise typer.Exit(1)
 
+    # Every heartbeat and crash report goes to this URL - reject anything
+    # that isn't https:// so a malformed or tampered connection string can't
+    # downgrade the agent to sending telemetry in plaintext.
+    if not str(cfg_data["url"]).startswith("https://"):
+        console.print("[red]Connection string's Supabase URL must be https:// - refusing to configure a non-TLS endpoint.[/red]")
+        raise typer.Exit(1)
+
     env_path = cfg_mod._find_env_file()
 
     lines_to_add = {
