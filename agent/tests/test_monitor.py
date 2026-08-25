@@ -127,3 +127,52 @@ async def test_keyless_analysis_includes_builtin_advice(monkeypatch, tmp_path):
     assert report["analysis"]["monitoring_suggestions"]
     assert report["analysis"]["forensic_snapshot"]["schema_version"] == 1
     assert report["analysis"]["forensic_snapshot"]["fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_boot_id_never_permanently_suppresses_analysis(monkeypatch, tmp_path):
+    """Regression: a platform with no discoverable boots (e.g. WSL1, no
+    journalctl) gets boot_id "unknown" from _extract_boot_context's
+    fallback. "unknown" isn't a real per-boot identifier, so persisting and
+    comparing against it as last_analyzed_boot must never cause a second,
+    genuinely-new crash to be silently skipped just because it also
+    produced "unknown"."""
+    monkeypatch.setenv("CRASHPILOT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("CRASHPILOT_DB_PATH", str(tmp_path / "crashpilot.db"))
+    monkeypatch.setenv("CRASHPILOT_ANTHROPIC_API_KEY", "")
+    import crashpilot.config as cfg_mod
+    cfg_mod._settings = None
+
+    telemetry = {
+        "journal": {
+            "boots": [],
+            "shutdown_info": "",
+            "oom_events": "Out of memory: Killed process 1234 (python3)",
+            "previous_boot_errors": "",
+            "previous_boot_logs_tail": "",
+        },
+        "dmesg": {"full_tail": "", "critical_events": [], "mce_events": ""},
+        "platform": {
+            "type": "bare_metal",
+            "distro": "ubuntu",
+            "distro_version": "24.04",
+            "init": "systemd",
+            "kernel": "test",
+            "arch": "x86_64",
+            "hostname": "test-host",
+        },
+    }
+
+    async def _collect():
+        return telemetry
+
+    monkeypatch.setattr("crashpilot.monitor.collect_telemetry", _collect)
+
+    first = await check_and_analyze(force=False)
+    second = await check_and_analyze(force=False)
+
+    assert first is not None
+    assert second is not None, (
+        "second call was skipped as \"already analyzed\" even though "
+        "boot_id is the non-identifying \"unknown\" sentinel both times"
+    )

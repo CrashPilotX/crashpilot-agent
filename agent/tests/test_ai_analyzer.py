@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -109,6 +110,39 @@ async def test_analyze_crash_normalizes_explicit_null_alternative_hypotheses(mon
     )
 
     assert result["alternative_hypotheses"] == []
+
+
+class TestExtractJson:
+    def test_returns_bare_json_unchanged(self):
+        text = '{"root_cause": "oom"}'
+        assert ai_analyzer._extract_json(text) == text
+
+    def test_extracts_deeply_nested_json_from_a_fenced_block(self):
+        # Regression: a non-greedy brace match used to stop at the first
+        # nested closing brace, truncating exactly this kind of response
+        # (evidence/remediation/timeline are lists of dicts per the real
+        # schema) into invalid JSON that silently discarded the whole
+        # analysis.
+        text = (
+            "Here is my analysis:\n"
+            "```json\n"
+            '{"root_cause": "oom", "evidence": [{"source": "dmesg", "excerpt": "x"}], '
+            '"remediation": [{"priority": 1, "action": "y"}]}\n'
+            "```\n"
+            "Let me know if you need more detail."
+        )
+        result = ai_analyzer._extract_json(text)
+        parsed = json.loads(result)
+        assert parsed["evidence"] == [{"source": "dmesg", "excerpt": "x"}]
+        assert parsed["remediation"] == [{"priority": 1, "action": "y"}]
+
+    def test_extracts_json_from_fence_without_language_tag(self):
+        text = '```\n{"a": {"b": 1}}\n```'
+        assert json.loads(ai_analyzer._extract_json(text)) == {"a": {"b": 1}}
+
+    def test_falls_back_to_first_and_last_brace_without_a_fence(self):
+        text = 'Sure, here is the JSON: {"a": {"b": 1}} - hope that helps.'
+        assert json.loads(ai_analyzer._extract_json(text)) == {"a": {"b": 1}}
 
 
 class TestTruncateTelemetry:

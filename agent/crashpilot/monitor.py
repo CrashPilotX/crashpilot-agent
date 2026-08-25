@@ -152,8 +152,16 @@ async def check_and_analyze(force: bool = False) -> dict | None:
 
     boot_id, prev_boot_id, crash_time = _extract_boot_context(telemetry)
 
+    # "unknown" isn't a real per-boot identifier (it's the fallback when no
+    # boot could be discovered at all, e.g. no journalctl - WSL1 has no
+    # systemd, so JournalCollector is never added there). Comparing and
+    # persisting it as if it were one would make the very first run pin
+    # last_analyzed_boot to "unknown" forever, so every later run's boot_id
+    # ("unknown" again) trivially matches and analysis is silently skipped
+    # forever after that - a permanent, silent data-loss path on any
+    # platform without journalctl.
     last_analyzed = get_meta("last_analyzed_boot")
-    if last_analyzed == boot_id and not force:
+    if boot_id != "unknown" and last_analyzed == boot_id and not force:
         log.info("Boot %s already analyzed - skipping.", boot_id)
         return None
 
@@ -162,7 +170,8 @@ async def check_and_analyze(force: bool = False) -> dict | None:
 
     if detection.crash_type == CrashType.CLEAN_SHUTDOWN and not force:
         log.info("Previous shutdown was clean - no report needed.")
-        set_meta("last_analyzed_boot", boot_id)
+        if boot_id != "unknown":
+            set_meta("last_analyzed_boot", boot_id)
         return None
 
     log.info(
@@ -240,7 +249,8 @@ async def check_and_analyze(force: bool = False) -> dict | None:
     except asyncio.TimeoutError:
         log.warning("Analysis timed out after %ds", cfg.analysis_timeout)
 
-    set_meta("last_analyzed_boot", boot_id)
+    if boot_id != "unknown":
+        set_meta("last_analyzed_boot", boot_id)
 
     if cfg.max_report_age_days > 0:
         removed = cleanup_old_reports(cfg.max_report_age_days)

@@ -33,6 +33,24 @@ class TestRedactText:
         assert "myuser" in redacted
         assert counts == {"basic_auth_url": 1}
 
+    def test_redacts_bearer_token_containing_base64_plus_and_slash(self):
+        # Regression: the value class used to exclude + and / (standard,
+        # non-URL-safe base64 characters common in opaque bearer tokens),
+        # so anything after the first one leaked in plaintext right next
+        # to the mask.
+        redacted, counts = redact_text("Authorization: Bearer abcDEF123456789012345+xyz/456==")
+        assert "abcDEF123456789012345+xyz/456==" not in redacted
+        assert "Authorization: Bearer [REDACTED:bearer_token]" == redacted
+        assert counts == {"bearer_token": 1}
+
+    def test_redacts_modern_openai_key_formats(self):
+        # Regression: sk-[A-Za-z0-9]{20,} didn't allow hyphens after the
+        # sk- prefix, so newer sk-proj-.../sk-svcacct-... formats broke the
+        # match a few characters in and passed through unredacted.
+        redacted, counts = redact_text("key is sk-proj-abcdefghijklmnopqrstuvwxyz1234567890")
+        assert "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890" not in redacted
+        assert counts == {"openai_key": 1}
+
     def test_redacts_labeled_password_but_keeps_the_key_name(self):
         redacted, counts = redact_text("password: hunter2isnotenoughchars")
         assert "hunter2isnotenoughchars" not in redacted

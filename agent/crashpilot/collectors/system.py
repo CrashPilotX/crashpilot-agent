@@ -54,7 +54,13 @@ class SystemCollector(BaseCollector):
                 "huge_pages_total": parsed.get("HugePages_Total", 0),
                 "huge_pages_free": parsed.get("HugePages_Free", 0),
             }
-        except OSError as e:
+        except (OSError, ValueError, IndexError) as e:
+            # ValueError/IndexError guard against a malformed /proc file
+            # (unexpected int()/float() parse or missing loadavg field) -
+            # without this, that single bad line would raise past this
+            # method into safe_collect() and lose every other system field
+            # (memory, cpu, disk, etc. are collected together) instead of
+            # just degrading the one field that couldn't be parsed.
             return {"error": str(e)}
 
     async def _collect_disk(self) -> dict:
@@ -98,7 +104,13 @@ class SystemCollector(BaseCollector):
                 "load_5m": float(loadavg[1]),
                 "load_15m": float(loadavg[2]),
             }
-        except OSError as e:
+        except (OSError, ValueError, IndexError) as e:
+            # ValueError/IndexError guard against a malformed /proc file
+            # (unexpected int()/float() parse or missing loadavg field) -
+            # without this, that single bad line would raise past this
+            # method into safe_collect() and lose every other system field
+            # (memory, cpu, disk, etc. are collected together) instead of
+            # just degrading the one field that couldn't be parsed.
             return {"error": str(e)}
 
     async def _collect_pcie(self) -> list[str]:
@@ -140,7 +152,7 @@ class SystemCollector(BaseCollector):
         }
 
     async def _collect_process_info(self) -> str:
-        """Snapshot of processes — useful for context around a crash."""
+        """Snapshot of processes - useful for context around a crash."""
         stdout, _, _ = await run_cmd(
             "ps", "aux", "--sort=-%mem", timeout=10
         )

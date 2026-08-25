@@ -15,6 +15,26 @@ from typing import Any
 
 from .base import BaseCollector, run_cmd
 
+# Names that show up under /mnt/c/Users but are never a real user's profile.
+_NON_USER_PROFILE_DIRS = {"Public", "Default", "Default User", "All Users"}
+
+
+def _windows_user_profile_dirs(base: Path = Path("/mnt/c/Users")) -> list[Path]:
+    """Enumerate real Windows user profile directories under /mnt/c/Users.
+
+    $LOGNAME/$USER inside WSL is the *Linux* distro username, not the
+    Windows account name - they're commonly different (e.g. Linux user
+    "saqib", Windows account "Saqib Khan"). Guessing a single path from
+    LOGNAME silently fails whenever they differ.
+    """
+    try:
+        return sorted(
+            p for p in base.iterdir()
+            if p.is_dir() and p.name not in _NON_USER_PROFILE_DIRS and not p.name.startswith(".")
+        )
+    except OSError:
+        return []
+
 
 class WslCollector(BaseCollector):
     name = "wsl"
@@ -74,7 +94,12 @@ class WslCollector(BaseCollector):
         info: dict[str, Any] = {}
         try:
             info["wsl_env"] = os.environ.get("WSL_DISTRO_NAME", "")
-            info["windows_username"] = os.environ.get("LOGNAME", "")
+            # Only confident when there's exactly one real profile - with
+            # multiple Windows accounts on the machine we can't tell which
+            # one is "the" user from inside WSL, so leave it unset rather
+            # than guess wrong (see _windows_user_profile_dirs).
+            profiles = _windows_user_profile_dirs()
+            info["windows_username"] = profiles[0].name if len(profiles) == 1 else None
             # Check if Windows filesystem is mounted
             info["windows_mounted"] = Path("/mnt/c/Windows").exists()
             # WSL2 VM memory
@@ -104,7 +129,7 @@ class WslCollector(BaseCollector):
             except Exception:
                 info["windows_raw"] = stdout[:500]
 
-        # Windows event log — last 20 critical/error system events
+        # Windows event log - last 20 critical/error system events
         evt_out, _, rc2 = await run_cmd(
             "powershell.exe", "-NoProfile", "-Command",
             "Get-EventLog -LogName System -EntryType Error,Warning -Newest 20 "
@@ -122,7 +147,7 @@ class WslCollector(BaseCollector):
         return info
 
     async def _get_wsl_memory(self) -> dict:
-        """WSL memory info — useful because WSL2 has a memory limit."""
+        """WSL memory info - useful because WSL2 has a memory limit."""
         try:
             meminfo = Path("/proc/meminfo").read_text()
             parsed = {}
@@ -143,21 +168,23 @@ class WslCollector(BaseCollector):
         hints = []
 
         if version == 1:
-            hints.append("WSL1: No true kernel — crashes are almost always Windows host issues or application bugs")
+            hints.append("WSL1: No true kernel - crashes are almost always Windows host issues or application bugs")
             hints.append("WSL1: Check Windows Event Viewer for System/Application errors around crash time")
 
         if version == 2:
-            # Try to read .wslconfig via /mnt path to check memory limits
-            for candidate in [
-                "/mnt/c/Users/" + (os.environ.get("LOGNAME", "") or "default") + "/.wslconfig",
-            ]:
+            # Check every real Windows profile for .wslconfig - can't guess
+            # a single one from the Linux username (see
+            # _windows_user_profile_dirs), and .wslconfig is machine-wide
+            # so it can legitimately live under any profile that created it.
+            for profile in _windows_user_profile_dirs():
+                candidate = profile / ".wslconfig"
                 try:
-                    text = Path(candidate).read_text()
-                    if "memory" in text.lower():
-                        hints.append(f".wslconfig found at {candidate} — check MemoryMB limit")
-                    break
+                    text = candidate.read_text()
                 except OSError:
                     continue
+                if "memory" in text.lower():
+                    hints.append(f".wslconfig found at {candidate}: check MemoryMB limit")
+                break
 
             # Check WSL2 kernel panic log
             for log_path in ["/var/log/dmesg", "/var/log/kern.log"]:
@@ -175,7 +202,7 @@ class WslCollector(BaseCollector):
         if version == 1:
             lims += [
                 "No kernel ring buffer (dmesg unavailable)",
-                "No systemd — cannot use journalctl boot analysis",
+                "No systemd - cannot use journalctl boot analysis",
                 "No SMART access (no direct disk hardware)",
                 "No GPU telemetry (paravirtualized)",
                 "No thermal sensors",
@@ -187,6 +214,6 @@ class WslCollector(BaseCollector):
                 "No SMART disk access (virtual disk)",
                 "GPU pass-through available but not always enabled",
                 "systemd available if enabled in /etc/wsl.conf",
-                "Memory limited by .wslconfig — OOM more likely than on bare metal",
+                "Memory limited by .wslconfig - OOM more likely than on bare metal",
             ]
         return lims

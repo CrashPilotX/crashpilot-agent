@@ -27,13 +27,20 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("stripe_key", re.compile(r"\b[sr]k_live_[A-Za-z0-9]{16,}\b")),
     ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b")),
     ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{20,}\b")),
-    ("openai_key", re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")),
+    # Allows hyphens after the sk- prefix for modern key formats like
+    # sk-proj-... and sk-svcacct-..., not just the older bare sk-<alnum>.
+    ("openai_key", re.compile(r"\bsk-[A-Za-z0-9-]{20,}\b")),
     ("private_key_block", re.compile(
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
         re.DOTALL,
     )),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
-    ("bearer_token", re.compile(r"\bBearer\s+([A-Za-z0-9\-_.=]{20,})\b", re.IGNORECASE)),
+    # The value class excludes whitespace, quotes, and [] (same reasoning as
+    # labeled_credential below) rather than an alnum-ish allowlist - opaque
+    # bearer tokens are commonly standard (non-URL-safe) base64, which uses
+    # + and / that a narrower class would leave unredacted right next to
+    # the mask.
+    ("bearer_token", re.compile(r"\bBearer\s+([^\s'\"\[\]]{20,})", re.IGNORECASE)),
     # user:password@host in a URL - keep the scheme/host, mask the credential.
     ("basic_auth_url", re.compile(r"(?<=://)[^:/\s@]+:([^@/\s]+)@")),
     # key=value / key: "value" where the key name looks like a credential.

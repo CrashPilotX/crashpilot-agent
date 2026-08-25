@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import textwrap
 from typing import Any
 
@@ -227,16 +228,18 @@ def _extract_json(text: str) -> str:
     """Extract JSON from a response that might be wrapped in markdown code fences."""
     if text.startswith("{"):
         return text
-    # Try to find ```json ... ``` block
-    import re
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m:
-        return m.group(1)
-    # Find first { to last }
-    start = text.find("{")
-    end = text.rfind("}") + 1
+    # If there's a fenced block, extract JSON from inside it; otherwise
+    # search the whole text. Either way, take from the first { to the last
+    # } - a non-greedy brace match (\{.*?\}) would stop at the first nested
+    # closing brace and truncate the deeply-nested schema this module
+    # actually asks for (evidence/remediation/timeline are lists of dicts),
+    # silently producing invalid JSON that gets discarded as a parse error.
+    fence = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    candidate = fence.group(1) if fence else text
+    start = candidate.find("{")
+    end = candidate.rfind("}") + 1
     if start != -1 and end > start:
-        return text[start:end]
+        return candidate[start:end]
     return text
 
 
