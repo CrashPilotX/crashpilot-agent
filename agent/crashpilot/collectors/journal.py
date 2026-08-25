@@ -1,11 +1,27 @@
-"""journalctl telemetry collector — previous and current boot logs."""
+"""journalctl telemetry collector - previous and current boot logs."""
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from .base import BaseCollector, run_cmd
+
+
+def _boot_timestamp_to_iso(value: Any) -> str:
+    """journalctl --output=json reports first_entry/last_entry as microseconds
+    since epoch, not a formatted date. Convert so downstream consumers (crash
+    report retention, ordering, display) get a real ISO-8601 string instead of
+    a raw integer that happens to sort/parse wrong."""
+    if isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
+        try:
+            return datetime.fromtimestamp(int(value) / 1_000_000, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        except (OverflowError, OSError, ValueError):
+            return str(value)
+    return str(value)
 
 
 class JournalCollector(BaseCollector):
@@ -16,8 +32,11 @@ class JournalCollector(BaseCollector):
 
     async def collect(self) -> dict[str, Any]:
         boots = await self._list_boots()
-        prev_boot_id = boots[1]["boot_id"] if len(boots) > 1 else None
-        current_boot_id = boots[0]["boot_id"] if boots else None
+        # journalctl --list-boots returns boots oldest-first (index 0, the
+        # current boot, is always the LAST entry) - the current/previous boot
+        # are the last two entries, not the first two.
+        current_boot_id = boots[-1]["boot_id"] if boots else None
+        prev_boot_id = boots[-2]["boot_id"] if len(boots) > 1 else None
 
         prev_logs = ""
         prev_priority_logs = ""
@@ -35,7 +54,7 @@ class JournalCollector(BaseCollector):
         oom_events = await self._get_oom_events(prev_boot_id)
 
         return {
-            "boots": boots[:5],
+            "boots": boots[-5:],
             "current_boot_id": current_boot_id,
             "previous_boot_id": prev_boot_id,
             "previous_boot_logs_tail": prev_logs,
@@ -58,8 +77,8 @@ class JournalCollector(BaseCollector):
                 boots.append({
                     "index": entry.get("index", 0),
                     "boot_id": entry.get("boot_id", ""),
-                    "first_entry": entry.get("first_entry", ""),
-                    "last_entry": entry.get("last_entry", ""),
+                    "first_entry": _boot_timestamp_to_iso(entry.get("first_entry", "")),
+                    "last_entry": _boot_timestamp_to_iso(entry.get("last_entry", "")),
                 })
             except json.JSONDecodeError:
                 continue

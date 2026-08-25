@@ -111,6 +111,25 @@ async def test_analyze_crash_normalizes_explicit_null_alternative_hypotheses(mon
     assert result["alternative_hypotheses"] == []
 
 
+class TestTruncateTelemetry:
+    def test_leaf_strings_are_bounded_by_max_chars_not_a_hardcoded_constant(self):
+        # Regression: the per-field truncation threshold used to be a
+        # hardcoded 8000 regardless of max_chars, so a small max_chars budget
+        # had no effect on the actual output size.
+        telemetry = {"dmesg": "x" * 5000}
+        result = ai_analyzer._truncate_telemetry(telemetry, max_chars=2000)
+        assert len(result["dmesg"]) == 2000
+        assert result["dmesg"] == ("x" * 5000)[-2000:]
+
+    def test_short_strings_are_left_untouched(self):
+        telemetry = {"dmesg": "short line"}
+        result = ai_analyzer._truncate_telemetry(telemetry, max_chars=2000)
+        assert result["dmesg"] == "short line"
+
+    def test_empty_telemetry_returns_empty_dict(self):
+        assert ai_analyzer._truncate_telemetry({}, max_chars=2000) == {}
+
+
 class TestNoApiKeyResultEvidence:
     def test_evidence_carries_real_source_and_extracted_metadata(self):
         detection = {

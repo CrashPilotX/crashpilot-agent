@@ -112,11 +112,14 @@ ANALYSIS_SCHEMA = {
 def _truncate_telemetry(telemetry: dict, max_chars: int = 80_000) -> dict:
     """Trim large text fields to fit within Claude's context window."""
     result: dict[str, Any] = {}
+    if not telemetry:
+        return result
+    per_field_limit = max(max_chars // len(telemetry), 500)
     for key, val in telemetry.items():
         if isinstance(val, dict):
-            result[key] = _truncate_telemetry(val, max_chars // len(telemetry))
-        elif isinstance(val, str) and len(val) > 8000:
-            result[key] = val[-8000:]  # keep tail (most recent)
+            result[key] = _truncate_telemetry(val, per_field_limit)
+        elif isinstance(val, str) and len(val) > per_field_limit:
+            result[key] = val[-per_field_limit:]  # keep tail (most recent)
         else:
             result[key] = val
     return result

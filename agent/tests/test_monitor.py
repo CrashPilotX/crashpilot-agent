@@ -22,19 +22,21 @@ class TestMakeReportId:
 
 class TestExtractBootContext:
     def _tel(self, boots=None, shutdown="") -> dict:
+        # boots is oldest-first, matching journalctl --list-boots: the
+        # current boot is the LAST entry, previous is second-to-last.
         return {
             "journal": {
                 "boots": boots or [],
-                "current_boot_id": boots[0]["boot_id"] if boots else None,
-                "previous_boot_id": boots[1]["boot_id"] if boots and len(boots) > 1 else None,
+                "current_boot_id": boots[-1]["boot_id"] if boots else None,
+                "previous_boot_id": boots[-2]["boot_id"] if boots and len(boots) > 1 else None,
                 "shutdown_info": shutdown,
             }
         }
 
     def test_two_boots_returns_both(self):
         tel = self._tel(boots=[
-            {"boot_id": "cur", "first_entry": "t1", "last_entry": "t2"},
             {"boot_id": "prev", "first_entry": "t3", "last_entry": "t4"},
+            {"boot_id": "cur", "first_entry": "t1", "last_entry": "t2"},
         ])
         current, previous, crash_time = _extract_boot_context(tel)
         assert current == "cur"
@@ -55,6 +57,25 @@ class TestExtractBootContext:
         current, previous, crash_time = _extract_boot_context(tel)
         assert current == "unknown"
         assert previous is None
+
+    def test_falls_back_to_last_two_boots_when_ids_missing(self):
+        # No current_boot_id/previous_boot_id keys at all - exercises the
+        # boots[-1]/boots[-2] fallback directly, oldest-first like real
+        # journalctl output.
+        tel = {
+            "journal": {
+                "boots": [
+                    {"boot_id": "oldest", "first_entry": "t0", "last_entry": "t1"},
+                    {"boot_id": "prev", "first_entry": "t2", "last_entry": "t3"},
+                    {"boot_id": "cur", "first_entry": "t4", "last_entry": "t5"},
+                ],
+                "shutdown_info": "",
+            }
+        }
+        current, previous, crash_time = _extract_boot_context(tel)
+        assert current == "cur"
+        assert previous == "prev"
+        assert crash_time == "t3"
 
 
 

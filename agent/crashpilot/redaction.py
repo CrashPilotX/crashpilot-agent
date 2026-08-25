@@ -38,9 +38,16 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("basic_auth_url", re.compile(r"(?<=://)[^:/\s@]+:([^@/\s]+)@")),
     # key=value / key: "value" where the key name looks like a credential.
     # Group 1 is the value only, so the key name stays visible for context.
+    # The value class deliberately excludes only whitespace, quotes, and the
+    # [] used by _MASK (not just alnum) - passwords routinely contain
+    # @ ! # $ % etc., and a value with such a character used to fail the
+    # whole match, leaving the credential completely unredacted instead of
+    # partially redacted. Excluding [] specifically keeps this pattern from
+    # re-matching another pattern's mask (e.g. "token=[REDACTED:aws_key]")
+    # as if it were the secret value and double-redacting it.
     ("labeled_credential", re.compile(
         r"(?i)\b(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|"
-        r"auth[_-]?token|credential)s?\s*[:=]\s*['\"]?([A-Za-z0-9\-_./+=]{6,})['\"]?"
+        r"auth[_-]?token|credential)s?\s*[:=]\s*['\"]?([^\s'\"\[\]]{6,})['\"]?"
     )),
 ]
 

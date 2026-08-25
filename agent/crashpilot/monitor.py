@@ -301,8 +301,10 @@ def _extract_boot_context(
     journal = telemetry.get("journal", {})
     boots = journal.get("boots", [])
 
-    current = journal.get("current_boot_id") or (boots[0]["boot_id"] if boots else "unknown")
-    previous = journal.get("previous_boot_id") or (boots[1]["boot_id"] if len(boots) > 1 else None)
-    crash_time = boots[1].get("last_entry") if len(boots) > 1 else None
+    # boots is oldest-first (journalctl convention: index 0 / current boot is
+    # the last entry), so current/previous are the last two entries.
+    current = journal.get("current_boot_id") or (boots[-1]["boot_id"] if boots else "unknown")
+    previous = journal.get("previous_boot_id") or (boots[-2]["boot_id"] if len(boots) > 1 else None)
+    crash_time = boots[-2].get("last_entry") if len(boots) > 1 else None
 
     return current, previous, crash_time

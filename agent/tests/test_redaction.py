@@ -64,6 +64,28 @@ class TestRedactText:
         assert redacted == line
         assert counts == {}
 
+    def test_redacts_labeled_password_containing_special_characters(self):
+        # Regression: the value character class used to be alnum-only, so a
+        # password with @/!/# etc. failed the whole match and passed through
+        # completely unredacted instead of being caught.
+        redacted, counts = redact_text("password: P@ssw0rd!123")
+        assert "P@ssw0rd!123" not in redacted
+        assert "password:" in redacted
+        assert counts == {"labeled_credential": 1}
+
+    def test_redacts_labeled_secret_with_hash_and_ampersand(self):
+        redacted, counts = redact_text("password=Sn0w!Fall#42&more")
+        assert "Sn0w!Fall#42" not in redacted
+        assert counts == {"labeled_credential": 1}
+
+    def test_does_not_double_redact_another_patterns_mask(self):
+        # Regression: a broadened labeled_credential value class must not
+        # re-match another pattern's [REDACTED:...] mask as if it were the
+        # secret itself once that pattern has already run.
+        redacted, counts = redact_text("token=AKIAIOSFODNN7EXAMPLE failed")
+        assert redacted == "token=[REDACTED:aws_access_key] failed"
+        assert counts == {"aws_access_key": 1}
+
     def test_counts_multiple_distinct_secrets_in_one_string(self):
         text = "AKIAIOSFODNN7EXAMPLE and password=hunter22isnotenough"
         _, counts = redact_text(text)
