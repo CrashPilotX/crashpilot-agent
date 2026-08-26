@@ -14,7 +14,7 @@ description: |
   AI-powered Linux crash forensics and root-cause analysis.
   Detects abnormal reboots/crashes, explains why, and pushes reports to the
   CrashPilot dashboard. Heuristic analysis works with no API key.
-homepage: https://github.com/kdigitalsystems/CrashPilot
+homepage: https://crashpilotx.com
 license: MIT
 
 # The PyInstaller binary is self-contained, so there are no runtime deps.
