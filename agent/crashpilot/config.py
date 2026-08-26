@@ -130,5 +130,15 @@ _settings: Optional[Settings] = None
 def get_settings() -> Settings:
     global _settings
     if _settings is None:
-        _settings = Settings()
+        # env_file=_find_env_file() in Settings.model_config above is only
+        # ever evaluated once, when this module's Settings class body first
+        # executes - it does NOT re-run discovery on every Settings()
+        # instantiation. Callers that set CRASHPILOT_CONFIG_DIR (or
+        # otherwise change which .env should take precedence) after this
+        # module was already imported, then reset _settings = None
+        # expecting a fresh reload, would silently keep reading the
+        # original path. Passing _env_file explicitly re-runs discovery on
+        # every call, which is what the _settings-reset pattern used
+        # throughout this codebase and its tests actually relies on.
+        _settings = Settings(_env_file=_find_env_file())
     return _settings

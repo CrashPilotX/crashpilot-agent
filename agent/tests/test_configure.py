@@ -225,6 +225,106 @@ class TestHeartbeat:
         assert pushed_ids == ["crash_backfill1"]
         assert count_unpushed() == 0
 
+    def test_backfill_skips_a_rejected_report_but_still_pushes_others(self, monkeypatch):
+        """Regression: the backfill loop used to stop on ANY push failure.
+        list_unpushed() returns oldest-first, so a single report the backend
+        will never accept (a payload that trips a Postgres constraint, an
+        HTTP 4xx) permanently starved every newer report queued behind it -
+        every cycle re-fetched the same broken report first and gave up.
+        Only a connection-level failure should stop the whole cycle; a 4xx
+        should skip just that one report and keep going."""
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "https://x.supabase.co")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_ANON_KEY", "anon-key")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_SYSTEM_ID", "77777777-7777-7777-7777-777777777777")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_TOKEN", "tok")
+        import crashpilot.config as cfg_mod
+        cfg_mod._settings = None
+
+        from crashpilot.storage.store import count_unpushed, init_db, save_report
+        init_db()
+        save_report({
+            "id": "crash_bad",
+            "boot_id": "boot_bad",
+            "detected_at": "2026-01-01T00:00:00+00:00",
+            "crash_time": None,
+            "crash_type": "oom_kill",
+            "severity": "high",
+            "summary": "the backend will never accept this one",
+            "telemetry": {"platform": {"type": "bare_metal"}},
+            "analysis": {"ai_analyzed": False},
+        })
+        save_report({
+            "id": "crash_good",
+            "boot_id": "boot_good",
+            "detected_at": "2026-01-02T00:00:00+00:00",
+            "crash_time": None,
+            "crash_type": "oom_kill",
+            "severity": "high",
+            "summary": "queued behind the bad one",
+            "telemetry": {"platform": {"type": "bare_metal"}},
+            "analysis": {"ai_analyzed": False},
+        })
+        assert count_unpushed() == 2
+
+        import httpx
+
+        pushed_ids = []
+
+        async def _push_that_rejects_crash_bad(*, report, **_):
+            if report["id"] == "crash_bad":
+                request = httpx.Request("POST", "https://x.supabase.co/rest/v1/rpc/agent_push_report")
+                response = httpx.Response(400, request=request, json={"message": "constraint violation"})
+                raise httpx.HTTPStatusError("Bad Request", request=request, response=response)
+            pushed_ids.append(report["id"])
+            return report["id"]
+
+        monkeypatch.setattr("crashpilot.cloud_push.push_report", _push_that_rejects_crash_bad)
+
+        result = runner.invoke(app, ["heartbeat"])
+        assert result.exit_code == 0, result.output
+        assert pushed_ids == ["crash_good"]
+        # crash_bad stays queued (visible in "doctor"'s pending count) rather
+        # than being silently discarded, but it must not have blocked
+        # crash_good from going out.
+        assert count_unpushed() == 1
+
+    def test_backfill_stops_entirely_on_a_connection_failure(self, monkeypatch):
+        """A connection-level failure likely means every remaining report
+        would fail too - unlike a 4xx, this should stop the whole cycle
+        rather than churning through the rest of the queue."""
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "https://x.supabase.co")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_ANON_KEY", "anon-key")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_SYSTEM_ID", "77777777-7777-7777-7777-777777777777")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_TOKEN", "tok")
+        import crashpilot.config as cfg_mod
+        cfg_mod._settings = None
+
+        from crashpilot.storage.store import count_unpushed, init_db, save_report
+        init_db()
+        save_report({
+            "id": "crash_unreachable",
+            "boot_id": "boot_1",
+            "detected_at": "2026-01-01T00:00:00+00:00",
+            "crash_time": None,
+            "crash_type": "oom_kill",
+            "severity": "high",
+            "summary": "network is down",
+            "telemetry": {"platform": {"type": "bare_metal"}},
+            "analysis": {"ai_analyzed": False},
+        })
+        assert count_unpushed() == 1
+
+        import httpx
+
+        async def _connection_refused(*, report, **_):
+            raise httpx.ConnectError("Connection refused", request=httpx.Request("POST", "https://x.supabase.co"))
+
+        monkeypatch.setattr("crashpilot.cloud_push.push_report", _connection_refused)
+
+        result = runner.invoke(app, ["heartbeat"])
+        assert result.exit_code == 0, result.output
+        assert count_unpushed() == 1
+
 
 # ── doctor ────────────────────────────────────────────────────────────────────
 

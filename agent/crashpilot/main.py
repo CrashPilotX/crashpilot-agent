@@ -457,6 +457,20 @@ def heartbeat(
         )
         # Backfill: flush any reports that never reached the cloud (e.g. a crash
         # whose boot-time push failed before the network was up).
+        #
+        # list_unpushed() returns oldest-first, so stopping on ANY failure
+        # (as this used to do) means one report the backend will never
+        # accept - a payload that trips a Postgres constraint, an
+        # oversized JSONB field - permanently starves every newer report
+        # behind it: each cycle re-fetches the same oldest (broken) report
+        # first, fails, and breaks, so the rest of the queue is never even
+        # attempted again. Only a connection-level failure (backend
+        # unreachable - every other report would fail identically too)
+        # should stop the whole cycle; an HTTP 4xx means this specific
+        # report's payload was rejected, so skip just that one and keep
+        # going.
+        import httpx
+
         flushed = 0
         for rep in list_unpushed():
             try:
@@ -469,8 +483,20 @@ def heartbeat(
                 )
                 mark_pushed(rep["id"])
                 flushed += 1
+            except httpx.HTTPStatusError as exc:
+                if 400 <= exc.response.status_code < 500:
+                    logging.getLogger(__name__).warning(
+                        "Backfill push rejected for report %s (HTTP %d) - skipping it, "
+                        "continuing with the rest of the queue: %s",
+                        rep.get("id"), exc.response.status_code, exc,
+                    )
+                    continue
+                logging.getLogger(__name__).warning("Backfill push failed: %s", exc)
+                break
             except Exception as exc:
-                # Stop on the first failure — retry the rest next cycle.
+                # Connection/timeout/unexpected errors likely affect every
+                # remaining report too - stop and retry the whole queue
+                # next cycle rather than burning through it on a dead link.
                 logging.getLogger(__name__).warning("Backfill push failed: %s", exc)
                 break
         if cfg.webhook_url:

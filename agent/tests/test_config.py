@@ -68,6 +68,37 @@ class TestSettings:
         cfg = get_settings()
         assert cfg.anthropic_api_key == "sk-ant-test-key"
 
+    def test_resets_settings_re_discover_the_env_file_when_config_dir_changes(self, tmp_path, monkeypatch):
+        """Regression: Settings.model_config's env_file=_find_env_file() is
+        only evaluated once, when the Settings class body first executes -
+        it does not automatically re-run just because _settings is reset to
+        None. get_settings() must explicitly re-discover the .env path on
+        every call, or a CRASHPILOT_CONFIG_DIR change made after this
+        module's first import would be silently ignored forever, even
+        though "reset _settings and call get_settings() again" looks like
+        (and is documented/used everywhere else as) a full reload."""
+        import crashpilot.config as cfg_mod
+
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        (dir_a / ".env").write_text("CRASHPILOT_ANTHROPIC_API_KEY=from-dir-a\n")
+        (dir_b / ".env").write_text("CRASHPILOT_ANTHROPIC_API_KEY=from-dir-b\n")
+
+        # A real env var takes precedence over the .env file, which would
+        # mask the very thing this test is checking.
+        monkeypatch.delenv("CRASHPILOT_ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("CRASHPILOT_CONFIG_DIR", str(dir_a))
+        cfg_mod._settings = None
+        first = cfg_mod.get_settings()
+        assert first.anthropic_api_key == "from-dir-a"
+
+        monkeypatch.setenv("CRASHPILOT_CONFIG_DIR", str(dir_b))
+        cfg_mod._settings = None
+        second = cfg_mod.get_settings()
+        assert second.anthropic_api_key == "from-dir-b"
+
     def test_empty_api_key_is_falsy(self, monkeypatch):
         monkeypatch.setenv("CRASHPILOT_ANTHROPIC_API_KEY", "")
         import crashpilot.config as cfg_mod

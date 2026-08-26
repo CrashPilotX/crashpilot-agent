@@ -268,14 +268,24 @@ def summarize_window(hours: int = 1) -> dict[str, Any]:
     latest = samples[-1] if samples else None
     first = samples[0] if samples else None
     memory_growth: list[dict[str, Any]] = []
-    if first and latest:
-        first_by_identity = {
-            row.get("identity") or f"{row.get('pid')}|{row.get('name')}": row
-            for row in (first.get("processes") or {}).get("memory", [])
-        }
+    if samples and latest:
+        # Each snapshot's "memory" list is only the top-8 processes by RSS
+        # at that moment - a process doesn't appear in it at all until it's
+        # large enough to rank there. Comparing only against the very FIRST
+        # snapshot missed every process that started small and grew into
+        # the top 8 partway through the window: exactly the "quiet leak
+        # that eventually OOMs the box" case this feature exists to catch.
+        # Instead, compare against the EARLIEST snapshot in the window
+        # where each process identity appears anywhere in a top-8 list -
+        # the earliest point we have any recorded rss for it at all.
+        earliest_by_identity: dict[str, dict[str, Any]] = {}
+        for sample in samples:
+            for row in (sample.get("processes") or {}).get("memory", []):
+                identity = row.get("identity") or f"{row.get('pid')}|{row.get('name')}"
+                earliest_by_identity.setdefault(identity, row)
         for row in (latest.get("processes") or {}).get("memory", []):
             identity = row.get("identity") or f"{row.get('pid')}|{row.get('name')}"
-            previous = first_by_identity.get(identity)
+            previous = earliest_by_identity.get(identity)
             if previous:
                 growth = round(row["rss_mb"] - previous["rss_mb"], 1)
                 if growth > 10:
