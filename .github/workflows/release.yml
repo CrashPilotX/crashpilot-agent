@@ -1,0 +1,101 @@
+name: Release
+
+# Build self-contained binaries and .deb packages on a version tag and publish
+# them to a GitHub Release. Each architecture builds on a native runner, so
+# there is no QEMU emulation step.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NFPM_VERSION: "2.41.0"
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            nfpm_arch: x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            nfpm_arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install nfpm
+        run: |
+          curl -sfL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_${{ matrix.nfpm_arch }}.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin nfpm
+          nfpm --version
+
+      - name: Build binary and packages
+        env:
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: |
+          export VERSION="${VERSION#v}"   # v0.1.0 -> 0.1.0
+          [ -n "${VERSION}" ] || unset VERSION
+          bash packaging/build.sh
+
+      - name: Smoke-test binary and package
+        env:
+          CRASHPILOT_DATA_DIR: ${{ runner.temp }}/crashpilot-release-data
+          CRASHPILOT_DB_PATH: ${{ runner.temp }}/crashpilot-release-data/crashpilot.db
+        run: |
+          dist/crashpilot --help
+          dist/crashpilot snapshot --quiet
+          dpkg-deb --info dist/*.deb
+          test "$(dpkg-deb --field dist/*.deb Architecture)" = "${{ matrix.arch }}"
+          dpkg-deb --contents dist/*.deb | grep -q usr/bin/crashpilot
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p out
+          cp dist/*.deb out/
+          cp dist/crashpilot "out/crashpilot-linux-${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: pkg-*
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: cd artifacts && sha256sum ./* > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

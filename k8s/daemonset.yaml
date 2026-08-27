@@ -24,7 +24,7 @@ spec:
         - operator: Exists
       containers:
         - name: crashpilot
-          image: ghcr.io/kdigitalsystems/crashpilot:latest
+          image: ghcr.io/crashpilotx/crashpilot-agent:latest
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true

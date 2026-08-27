@@ -76,7 +76,7 @@ docker run -d --name crashpilot --restart unless-stopped \
   -v /var/log:/var/log:ro -v /run/log/journal:/run/log/journal:ro \
   -v /sys:/sys:ro -v /dev:/dev \
   --env-file /etc/crashpilot/.env \
-  ghcr.io/kdigitalsystems/crashpilot:latest
+  ghcr.io/crashpilotx/crashpilot-agent:latest
 ```
 
 ### Kubernetes

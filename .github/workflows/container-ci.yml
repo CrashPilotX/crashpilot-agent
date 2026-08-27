@@ -3,6 +3,7 @@ name: Container and Kubernetes CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -89,7 +90,7 @@ jobs:
       - name: Deploy node agent
         run: |
           sed \
-            -e "s|ghcr.io/kdigitalsystems/crashpilot:latest|${KIND_IMAGE_TAG}|" \
+            -e "s|ghcr.io/crashpilotx/crashpilot-agent:latest|${KIND_IMAGE_TAG}|" \
             -e 's|imagePullPolicy: IfNotPresent|imagePullPolicy: Never|' \
             k8s/daemonset.yaml > /tmp/crashpilot-daemonset.yaml
           kubectl apply --dry-run=client -f /tmp/crashpilot-daemonset.yaml
@@ -97,3 +98,41 @@ jobs:
           kubectl rollout status daemonset/crashpilot-agent -n crashpilot --timeout=180s
           kubectl get pods -n crashpilot -o wide
           kubectl logs -n crashpilot -l app.kubernetes.io/name=crashpilot --tail=50
+
+  publish-image:
+    name: Publish multi-arch OCI image
+    if: github.event_name == 'push'
+    needs: [docker-smoke, kubernetes-kind]
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/crashpilotx/crashpilot-agent
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short,prefix=sha-
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

@@ -46,7 +46,7 @@ docker run -d --name crashpilot \
 Or use `docker compose -f docker/compose.yaml up -d`.
 
 The published multi-architecture image is
-`ghcr.io/kdigitalsystems/crashpilot:latest`.
+`ghcr.io/crashpilotx/crashpilot-agent:latest`.
 
 An unprivileged container can monitor only itself. Host crash forensics requires
 host PID visibility, read-only host logs/sysfs, `/dev`, and elevated privileges.
