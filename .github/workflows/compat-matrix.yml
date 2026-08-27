@@ -70,11 +70,15 @@ jobs:
           esac
 
           # The runner's own Docker daemon is local, so a bind mount of the
-          # checked-out source resolves correctly here.
+          # checked-out source resolves correctly here. The mount stays
+          # read-only and the source is copied to a writable path inside the
+          # container first, because setuptools writes an .egg-info directory
+          # into the source tree while building.
           set +e
-          docker run --rm -v "${PWD}/agent:/agent:ro" "$MATRIX_IMAGE" sh -c "
+          docker run --rm -v "${PWD}/agent:/src:ro" "$MATRIX_IMAGE" sh -c "
             set -e
             ${install_cmd}
+            cp -r /src /agent
             python3 -m venv /tmp/venv
             . /tmp/venv/bin/activate
             pip install --quiet /agent
