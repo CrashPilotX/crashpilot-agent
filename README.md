@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue)](https://python.org)
-[![Tests](https://github.com/crashpilot/crashpilot-agent/actions/workflows/test.yml/badge.svg)](https://github.com/crashpilot/crashpilot-agent/actions/workflows/test.yml)
+[![Tests](https://github.com/CrashPilotX/crashpilot-agent/actions/workflows/test.yml/badge.svg)](https://github.com/CrashPilotX/crashpilot-agent/actions/workflows/test.yml)
 [![Live demo](https://img.shields.io/badge/Try%20it-no%20signup%20required-orange)](https://crashpilotx.com/demo)
 
 ## Why this repo is public
@@ -54,7 +54,7 @@ curl -fsSL https://crashpilotx.com/install.sh | sudo bash
 Prefer not to pipe a script to `sudo bash`? Read [`agent/install.sh`](agent/install.sh) first, or install from source:
 
 ```bash
-git clone https://github.com/crashpilot/crashpilot-agent.git
+git clone https://github.com/CrashPilotX/crashpilot-agent.git
 cd crashpilot-agent/agent
 pip install .
 ```
