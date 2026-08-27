@@ -18,7 +18,7 @@ if [[ -z "${REPO_DIR:-}" || ! -f "$REPO_DIR/agent/pyproject.toml" ]]; then
   # stay private; the website publishes just the installable agent files.
   CLONE_DIR="$(mktemp -d)/CrashPilot"
   BUNDLE_URL="${CRASHPILOT_BUNDLE_URL:-https://crashpilotx.com/crashpilot-agent.tar.gz}"
-  echo "[info]  Standalone installer detected — downloading agent bundle..."
+  echo "[info]  Standalone installer detected: downloading agent bundle..."
   if command -v curl &>/dev/null && command -v tar &>/dev/null; then
     mkdir -p "$(dirname "$CLONE_DIR")"
     curl -fsSL "$BUNDLE_URL" | tar -xz -C "$(dirname "$CLONE_DIR")" \
@@ -191,7 +191,7 @@ install_python() {
 }
 
 if ! command -v python3 &>/dev/null; then
-  warn "Python 3 not found — installing..."
+  warn "Python 3 not found: installing..."
   install_python
 fi
 
@@ -220,7 +220,7 @@ _mce_package() {
   fi
 }
 
-# Try to install a single package; never exits — returns 0/1.
+# Try to install a single package; never exits: returns 0/1.
 _try_install_pkg() {
   local pkg="$1"
   _sudo apt-get install -y "$pkg" &>/dev/null && return 0
@@ -240,7 +240,7 @@ install_optional_tools() {
     if command -v "$tool" &>/dev/null; then
       ok "  $tool"
     else
-      warn "  $tool — not found"
+      warn "  $tool: not found"
       local pkg=""
       pkg="${PKG_APT[$tool]:-}"
       [[ -n "$pkg" ]] && missing+=("$pkg")
@@ -251,7 +251,7 @@ install_optional_tools() {
   local mce_pkg
   mce_pkg="$(_mce_package)"
   if ! command -v mcelog &>/dev/null && ! command -v rasdaemon &>/dev/null; then
-    warn "  mcelog/rasdaemon — not found"
+    warn "  mcelog/rasdaemon: not found"
     missing+=("$mce_pkg")
   else
     ok "  mcelog/rasdaemon"
@@ -269,14 +269,14 @@ install_optional_tools() {
   done
 
   if [[ ! -t 0 ]]; then
-    warn "Non-interactive install detected — skipping optional packages (${unique[*]})"
+    warn "Non-interactive install detected: skipping optional packages (${unique[*]})"
     warn "Install them later if needed: sudo apt-get install ${unique[*]}"
     return
   fi
 
   read -rp "$(echo -e "${YELLOW}Install missing packages (${unique[*]})?${RESET} [y/N] ")" ans
   if [[ ! "$ans" =~ ^[Yy]$ ]]; then
-    warn "Skipping optional packages — some collectors will be limited"
+    warn "Skipping optional packages: some collectors will be limited"
     return
   fi
 
@@ -303,7 +303,7 @@ install_speedtest_cli() {
   if _try_install_pkg speedtest-cli; then
     ok "  speedtest-cli"
   else
-    warn "  speedtest-cli — not available (passive network throughput will still work)"
+    warn "  speedtest-cli: not available (passive network throughput will still work)"
   fi
 }
 
@@ -318,7 +318,7 @@ if command -v journalctl &>/dev/null; then
   elif [[ $EUID -eq 0 ]]; then
     ok "journalctl readable (root)"
   else
-    warn "journalctl restricted — adding $USER to systemd-journal group"
+    warn "journalctl restricted: adding $USER to systemd-journal group"
     if getent group systemd-journal &>/dev/null; then
       sudo usermod -aG systemd-journal "$USER" && ok "Added to systemd-journal (re-login required)"
     fi
@@ -326,7 +326,7 @@ if command -v journalctl &>/dev/null; then
 fi
 
 if [[ $IS_WSL -eq 1 && ${WSL_VER:-1} -eq 1 ]]; then
-  warn "WSL1 detected — journalctl and dmesg are not available"
+  warn "WSL1 detected: journalctl and dmesg are not available"
   warn "Analysis will use Windows Event Log via PowerShell interop"
 fi
 
@@ -371,7 +371,7 @@ CRASHPILOT_BANDWIDTH_SPEEDTEST_TIMEOUT_SECONDS=90
 # CRASHPILOT_DATA_DIR=/var/lib/crashpilot  # uncomment for system-wide install
 ENVEOF
   # Private because push-mode credentials are stored here after configure.
-  # User installs: 600 (private — only the owning user needs it)
+  # User installs: 600 (private: only the owning user needs it)
   chmod 600 "$CONFIG_DIR/.env"
   ok "Created config: $CONFIG_DIR/.env"
   echo -e "\n  ${YELLOW}ACTION REQUIRED:${RESET} Add your Anthropic API key:"
@@ -413,15 +413,15 @@ if ! python3 -m venv "$VENV_DIR"; then
   err "python3 -m venv failed. Installing python3-venv / python3-full..."
   _try_install_pkg python3-venv || true
   _try_install_pkg python3-full || true
-  python3 -m venv "$VENV_DIR" || { err "Cannot create venv — install python3-venv manually"; exit 1; }
+  python3 -m venv "$VENV_DIR" || { err "Cannot create venv: install python3-venv manually"; exit 1; }
 fi
 
-# Bootstrap pip — Ubuntu 24.04 venvs sometimes ship without it
+# Bootstrap pip: Ubuntu 24.04 venvs sometimes ship without it
 if [[ ! -x "$VENV_DIR/bin/pip" ]]; then
-  info "pip missing from venv — bootstrapping with ensurepip..."
+  info "pip missing from venv: bootstrapping with ensurepip..."
   "$VENV_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null || \
   curl -sSf https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR/bin/python3" || \
-  { err "Cannot bootstrap pip — install python3-pip manually"; exit 1; }
+  { err "Cannot bootstrap pip: install python3-pip manually"; exit 1; }
 fi
 
 info "Upgrading pip..."
@@ -433,13 +433,13 @@ info "Installing CrashPilot package..."
 # back to the source directory, which breaks when that directory is deleted
 # (e.g. after a curl-pipe install where we cloned to a temp dir).
 if ! "$VENV_DIR/bin/pip" install --quiet "$REPO_DIR/agent"; then
-  err "pip install failed — check output above"
+  err "pip install failed: check output above"
   exit 1
 fi
 
 # Verify the binary exists before declaring success
 if [[ ! -x "$VENV_DIR/bin/crashpilot" ]]; then
-  err "crashpilot binary not found in venv after install — something went wrong"
+  err "crashpilot binary not found in venv after install: something went wrong"
   exit 1
 fi
 ok "CrashPilot installed in venv: $VENV_DIR"
@@ -450,7 +450,7 @@ create_wrapper() {
   mkdir -p "$(dirname "$target")"
   cat > "$target" << WRAPPER
 #!/bin/bash
-# CrashPilot wrapper — generated by install.sh
+# CrashPilot wrapper: generated by install.sh
 exec "$VENV_DIR/bin/crashpilot" "\$@"
 WRAPPER
   chmod +x "$target"
@@ -559,7 +559,7 @@ RUNIT
 
 if [[ $IS_WSL -eq 1 && "$INIT_SYS" == "systemd" ]]; then
   if [[ $EUID -eq 0 ]]; then
-    info "WSL with systemd detected — installing heartbeat timer"
+    info "WSL with systemd detected: installing heartbeat timer"
     install_systemd_services
   else
     read -rp "Install systemd services for WSL (requires sudo)? [Y/n] " ans
@@ -572,7 +572,7 @@ if [[ $IS_WSL -eq 1 && "$INIT_SYS" == "systemd" ]]; then
   fi
 
 elif [[ $IS_WSL -eq 1 ]]; then
-  info "WSL without systemd detected — skipping service installation"
+  info "WSL without systemd detected: skipping service installation"
   echo -e "  ${DIM}Run manually after connecting: crashpilot heartbeat${RESET}"
   echo -e "  ${DIM}Or enable systemd in WSL2 for automatic heartbeat timers.${RESET}"
 
@@ -606,7 +606,7 @@ elif [[ "$INIT_SYS" == "runit" ]]; then
   fi
 
 else
-  warn "Unknown init system '$INIT_SYS' — skipping service installation"
+  warn "Unknown init system '$INIT_SYS': skipping service installation"
   info "Run manually: crashpilot analyze"
 fi
 
@@ -636,7 +636,7 @@ CONNECTED=0
 if [[ -n "$CONNECT_STRING" ]]; then
   section "Connecting to dashboard"
   if [[ -z "$CRASHPILOT_BIN" ]]; then
-    err "Cannot connect — the CrashPilot CLI is not available."
+    err "Cannot connect: the CrashPilot CLI is not available."
   elif "$CRASHPILOT_BIN" configure "$CONNECT_STRING"; then
     # `configure` enables the heartbeat timer and sends the first heartbeat itself,
     # so the system is online as soon as this returns.
@@ -657,7 +657,7 @@ echo ""
 echo -e "  ${BOLD}Next steps:${RESET}"
 echo ""
 if [[ $CONNECTED -eq 1 ]]; then
-  echo -e "  ${GREEN}✓ Connected to the dashboard${RESET} — view it at:"
+  echo -e "  ${GREEN}✓ Connected to the dashboard${RESET}: view it at:"
   echo -e "     ${CYAN}https://crashpilotx.com/${RESET}"
   echo ""
   echo -e "  ${BOLD}1.${RESET} ${DIM}(Optional)${RESET} Add an Anthropic API key for AI root-cause analysis:"
@@ -666,7 +666,7 @@ if [[ $CONNECTED -eq 1 ]]; then
   echo -e "  ${BOLD}2.${RESET} Run your first analysis:"
   echo -e "     ${CYAN}sudo crashpilot analyze${RESET}"
 else
-  echo -e "  ${BOLD}1.${RESET} Connect to the dashboard ${DIM}— one command, no open ports needed:${RESET}"
+  echo -e "  ${BOLD}1.${RESET} Connect to the dashboard ${DIM}- one command, no open ports needed:${RESET}"
   echo -e "     a. Sign in at ${CYAN}https://crashpilotx.com/${RESET}"
   echo -e "        Go to ${BOLD}Systems → Add system${RESET}, enter a name, choose ${BOLD}Push mode${RESET}."
   echo -e "     b. Copy the one-line command it shows and run it here. It looks like:"
@@ -680,7 +680,7 @@ else
   echo -e "     ${CYAN}sudo crashpilot analyze${RESET}"
 fi
 echo ""
-echo -e "  ${DIM}Something not working? Run ${RESET}${CYAN}sudo crashpilot doctor${RESET}${DIM} — it diagnoses config, connection, and the timer.${RESET}"
+echo -e "  ${DIM}Something not working? Run ${RESET}${CYAN}sudo crashpilot doctor${RESET}${DIM}: it diagnoses config, connection, and the timer.${RESET}"
 echo ""
 
 # Clean up the temp clone directory if we created one during curl-pipe install

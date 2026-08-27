@@ -16,8 +16,6 @@ eggs/
 .eggs/
 lib/
 lib64/
-# Don't ignore web frontend source lib directories
-!web/src/lib/
 parts/
 sdist/
 var/
@@ -207,7 +205,6 @@ tempCodeRunnerFile.py
 
 # Ruff stuff:
 .ruff_cache/
-web/test-results/
 
 # PyPI configuration file
 .pypirc

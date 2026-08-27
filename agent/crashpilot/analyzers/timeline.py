@@ -72,7 +72,7 @@ def build_timeline(telemetry: dict[str, Any]) -> list[dict]:
             timestamp="",
             source="smart",
             level="error",
-            message=f"Disk {disk.get('device')} health: {disk.get('health')} — "
+            message=f"Disk {disk.get('device')} health: {disk.get('health')}: "
                     f"critical attrs: {disk.get('critical_attributes', {})}",
         ))
 

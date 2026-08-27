@@ -1,4 +1,4 @@
-"""Tests for cloud_push.py — push heartbeats and reports to Supabase.
+"""Tests for cloud_push.py: push heartbeats and reports to Supabase.
 
 Uses respx to mock httpx calls without requiring a real Supabase instance.
 asyncio_mode = "auto" is set in pyproject.toml so no @pytest.mark.asyncio needed.

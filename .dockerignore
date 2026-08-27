@@ -15,7 +15,5 @@ docs
 k8s
 outputs
 packaging
-supabase
 systemd
-web
 *.md

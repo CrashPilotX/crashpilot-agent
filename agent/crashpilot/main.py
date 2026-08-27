@@ -1,4 +1,4 @@
-"""CrashPilot CLI — entry point."""
+"""CrashPilot CLI: entry point."""
 
 from __future__ import annotations
 
@@ -45,14 +45,14 @@ def analyze(
     from .monitor import check_and_analyze
 
     console.print(Panel.fit(
-        "[bold cyan]CrashPilot[/bold cyan] — AI Crash Forensics",
+        "[bold cyan]CrashPilot[/bold cyan]: AI Crash Forensics",
         subtitle="Analyzing previous boot...",
     ))
 
     report = asyncio.run(check_and_analyze(force=force))
 
     if report is None:
-        console.print("[green]✓[/green] Previous boot ended cleanly — no crash detected.")
+        console.print("[green]✓[/green] Previous boot ended cleanly: no crash detected.")
         return
 
     analysis = report.get("analysis", {})
@@ -183,7 +183,7 @@ def list_reports(
             "critical": "red", "high": "orange3",
             "medium": "yellow", "low": "blue", "info": "dim",
         }.get(severity, "white")
-        ai_icon = "✓" if r.get("ai_analyzed") else "–"
+        ai_icon = "✓" if r.get("ai_analyzed") else "-"
         analysis = r.get("analysis") or {}
         summary = analysis.get("root_cause") or r.get("summary") or ""
         table.add_row(
@@ -217,7 +217,7 @@ def install_service() -> None:
         console.print("[green]✓[/green] CrashPilot service installed and enabled.")
         console.print("Start with: [cyan]sudo systemctl start crashpilot[/cyan]")
     except PermissionError as exc:
-        console.print("[red]Permission denied — run with sudo[/red]")
+        console.print("[red]Permission denied: run with sudo[/red]")
         raise typer.Exit(1) from exc
 
 
@@ -239,7 +239,7 @@ def token(
         if tf.exists():
             tf.unlink()
         if not raw:
-            console.print("[yellow]Regenerated direct-mode token — update any connected systems.[/yellow]\n")
+            console.print("[yellow]Regenerated direct-mode token: update any connected systems.[/yellow]\n")
 
     t = get_agent_token()
 
@@ -271,18 +271,18 @@ def token(
         )
         return
 
-    # ── Push mode not configured — guide the user ────────────────────────────
+    # ── Push mode not configured: guide the user ────────────────────────────
     console.print()
     console.print(Panel(
         f"[bold yellow]Not connected yet[/bold yellow]\n\n"
-        f"  CrashPilot connects outbound to the dashboard — no public URL or\n"
+        f"  CrashPilot connects outbound to the dashboard: no public URL or\n"
         f"  open ports needed.\n\n"
         f"  [bold]To connect:[/bold]\n"
         f"  1. Go to [link={dashboard}]{dashboard}[/link]\n"
         f"     Sign in → Systems → Add system → enter a name → Create system\n"
         f"  2. Run the one-line command it shows you, e.g.:\n"
         f"     [cyan]sudo crashpilot configure cpilot_<connection-string>[/cyan]",
-        title="[bold]CrashPilot — Connect to Dashboard[/bold]",
+        title="[bold]CrashPilot: Connect to Dashboard[/bold]",
         border_style="yellow",
     ))
 
@@ -367,7 +367,7 @@ def configure(
     except PermissionError:
         console.print(f"[yellow]![/yellow] Could not tighten permissions on {env_path}")
 
-    console.print(f"[green]✓[/green] Connected — credentials saved to {env_path}")
+    console.print(f"[green]✓[/green] Connected: credentials saved to {env_path}")
 
     # Reload settings so the heartbeat below picks up the new credentials.
     cfg_mod._settings = None
@@ -398,7 +398,7 @@ def configure(
             system_id=cfg2.supabase_system_id,
             agent_token=cfg2.supabase_token,
         ))
-        console.print("[green]✓[/green] Heartbeat sent — your system is now online in the dashboard.")
+        console.print("[green]✓[/green] Heartbeat sent: your system is now online in the dashboard.")
     except Exception as e:
         console.print(f"[yellow]![/yellow] Connected, but the first heartbeat failed: {e}")
 
@@ -435,7 +435,7 @@ def heartbeat(
     if missing:
         if not quiet:
             console.print(
-                "[yellow]Push mode is not configured[/yellow] — missing: "
+                "[yellow]Push mode is not configured[/yellow]: missing: "
                 + ", ".join(missing) + "\n"
                 "Run [cyan]sudo crashpilot configure cpilot_<connection-string>[/cyan] "
                 "(get the string from the dashboard → Systems → Add system → Push mode)."
@@ -508,14 +508,14 @@ def heartbeat(
     try:
         flushed = asyncio.run(_heartbeat_and_backfill())
     except Exception as e:
-        # Always surface the reason — for manual runs and for `journalctl` when
+        # Always surface the reason: for manual runs and for `journalctl` when
         # the timer fires. Detailed text comes from cloud_push._explain_http_error.
         console.print(f"[red]✗ Heartbeat failed:[/red] {e}")
         raise typer.Exit(1) from e
 
     if not quiet:
         console.print(
-            f"[green]✓ Heartbeat sent[/green] — system [dim]{cfg.supabase_system_id}[/dim] "
+            f"[green]✓ Heartbeat sent[/green]: system [dim]{cfg.supabase_system_id}[/dim] "
             "is now online in the dashboard."
         )
         if flushed:
@@ -632,13 +632,13 @@ def doctor() -> None:
             problems += 1
         line = f"  {icon} {label}"
         if detail:
-            line += f" [dim]— {detail}[/dim]"
+            line += f" [dim]- {detail}[/dim]"
         console.print(line)
         if hint:
             console.print(f"      [dim]{hint}[/dim]")
 
     console.print()
-    console.print("[bold cyan]CrashPilot Doctor[/bold cyan] — checking your setup\n")
+    console.print("[bold cyan]CrashPilot Doctor[/bold cyan]: checking your setup\n")
 
     # 1. Config file
     env_path = cfg_mod._find_env_file()
@@ -648,9 +648,9 @@ def doctor() -> None:
         report("Config file", "warn", "none found",
                "Run the install command or `sudo crashpilot configure cpilot_<string>`.")
 
-    # 2. Anthropic API key (optional — heuristic analysis works without it)
+    # 2. Anthropic API key (optional: heuristic analysis works without it)
     if cfg.anthropic_api_key:
-        report("Anthropic API key", "ok", "set — AI analysis enabled")
+        report("Anthropic API key", "ok", "set: AI analysis enabled")
     else:
         report("Anthropic API key", "warn", "not set",
                "Heuristic analysis still runs. Set CRASHPILOT_ANTHROPIC_API_KEY for AI root-cause.")
@@ -680,7 +680,7 @@ def doctor() -> None:
                 system_id=cfg.supabase_system_id,
                 agent_token=cfg.supabase_token,
             ))
-            report("Dashboard connection", "ok", "heartbeat delivered — system is online")
+            report("Dashboard connection", "ok", "heartbeat delivered: system is online")
         except Exception as e:
             lines = str(e).split("\n")
             report("Dashboard connection", "fail", lines[0].strip(),
@@ -736,7 +736,7 @@ def doctor() -> None:
         report("Pending uploads", "warn", f"{pending} report(s) not yet in the cloud",
                "They retry on each heartbeat. Run `sudo crashpilot heartbeat` to flush now.")
     else:
-        report("Pending uploads", "ok", "none — all reports delivered")
+        report("Pending uploads", "ok", "none: all reports delivered")
 
     console.print()
     if problems:
@@ -745,7 +745,7 @@ def doctor() -> None:
             "[red]✗[/red] above, then re-run [cyan]sudo crashpilot doctor[/cyan]."
         )
         raise typer.Exit(1)
-    console.print("[green]✓ All checks passed — CrashPilot is healthy.[/green]")
+    console.print("[green]✓ All checks passed: CrashPilot is healthy.[/green]")
 
 
 if __name__ == "__main__":

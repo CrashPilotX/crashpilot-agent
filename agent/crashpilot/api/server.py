@@ -1,4 +1,4 @@
-"""Local FastAPI server — serves crash reports to the web dashboard."""
+"""Local FastAPI server: serves crash reports to the web dashboard."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def get_agent_token() -> str:
     token = secrets.token_urlsafe(32)
     tf.write_text(token)
     tf.chmod(0o600)
-    log.info("Generated new API token — run `sudo crashpilot token` to view it")
+    log.info("Generated new API token: run `sudo crashpilot token` to view it")
     return token
 
 
@@ -105,7 +105,7 @@ app.add_middleware(
 
 @app.get("/health")
 async def health() -> dict:
-    """Unauthenticated — used by the dashboard to check reachability."""
+    """Unauthenticated: used by the dashboard to check reachability."""
     return {"status": "ok", "version": "0.2.0"}
 
 

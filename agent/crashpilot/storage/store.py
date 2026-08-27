@@ -88,7 +88,7 @@ def init_db() -> None:
                 )
             except sqlite3.OperationalError:
                 # Another process (e.g. the heartbeat loop starting alongside the
-                # boot analysis) added the column first — that's fine.
+                # boot analysis) added the column first: that's fine.
                 pass
 
 
@@ -171,7 +171,7 @@ def mark_pushed(report_id: str) -> None:
 
 def list_unpushed(limit: int = 50) -> list[dict]:
     """Return reports not yet confirmed in the cloud (oldest first), with
-    telemetry and analysis decoded — ready to hand to push_report()."""
+    telemetry and analysis decoded: ready to hand to push_report()."""
     with _conn() as con:
         rows = con.execute(
             """SELECT * FROM crash_reports

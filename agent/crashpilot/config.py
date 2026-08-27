@@ -29,7 +29,7 @@ def _find_env_file() -> Path:
     for p in candidates:
         if p.exists() and os.access(p, os.R_OK):
             return p
-    # Default (may not exist yet — pydantic-settings silently skips missing files)
+    # Default (may not exist yet: pydantic-settings silently skips missing files)
     return Path.home() / ".config" / "crashpilot" / ".env"
 
 
@@ -56,8 +56,8 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     claude_model: str = "claude-opus-4-7"
 
-    # Storage — use Optional[Path] so None is unambiguously "not set yet"
-    # (Path("") evaluates to PosixPath('.') which is truthy — don't use it as sentinel)
+    # Storage: use Optional[Path] so None is unambiguously "not set yet"
+    # (Path("") evaluates to PosixPath('.') which is truthy: don't use it as sentinel)
     data_dir: Optional[Path] = None
     db_path: Optional[Path] = None
 
@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     # Override with CRASHPILOT_API_TOKEN env var or in .env.
     api_token: str = ""
 
-    # Cloud push mode — set by `crashpilot configure <connection-string>`.
+    # Cloud push mode: set by `crashpilot configure <connection-string>`.
     # When configured, the agent pushes heartbeats and reports to Supabase
     # outbound (no public URL or open ports needed).
     supabase_url: str = ""
@@ -93,7 +93,7 @@ class Settings(BaseSettings):
     webhook_secret: str = ""
     maintenance_until: str = ""
 
-    # Egress budget — bytes this agent may send to Supabase per UTC day.
+    # Egress budget: bytes this agent may send to Supabase per UTC day.
     # Above egress_soft_limit_mb the agent switches to slim mode (live metrics only,
     # no dmesg/flight_recorder/agent_health).  Above egress_daily_limit_mb heartbeats
     # switch to an ultra-tiny keepalive until UTC midnight. Crash reports are always sent.
@@ -140,5 +140,8 @@ def get_settings() -> Settings:
         # original path. Passing _env_file explicitly re-runs discovery on
         # every call, which is what the _settings-reset pattern used
         # throughout this codebase and its tests actually relies on.
-        _settings = Settings(_env_file=_find_env_file())
+        # BaseSettings accepts _env_file at runtime, but pydantic-settings
+        # stopped declaring underscore-prefixed kwargs on the generated
+        # __init__, so the call needs an explicit ignore to type-check.
+        _settings = Settings(_env_file=_find_env_file())  # type: ignore[call-arg]
     return _settings

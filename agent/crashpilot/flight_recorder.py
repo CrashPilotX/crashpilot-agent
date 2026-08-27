@@ -68,7 +68,7 @@ def _top_processes(limit: int = 8) -> dict[str, list[dict[str, Any]]]:
     by_cpu = sorted(rows, key=lambda row: row["cpu_pct"], reverse=True)[:limit]
     # Resolve the cgroup/service name (a /proc/<pid>/cgroup read per process)
     # only for the small set of processes we're actually reporting, not for
-    # every process on the host — on a busy or shared box this can be the
+    # every process on the host: on a busy or shared box this can be the
     # difference between ~16 file reads and several thousand every tick.
     for row in {row["pid"]: row for row in (*by_memory, *by_cpu)}.values():
         row["service"] = _process_service(row["pid"])
@@ -176,7 +176,7 @@ def capture_snapshot(*, deep: bool = False) -> dict[str, Any]:
             "load_5m": round(load_5m, 2),
             "load_15m": round(load_15m, 2),
             # interval=None reports usage since the last call (or module
-            # import) instead of blocking for interval=0.1 seconds — this
+            # import) instead of blocking for interval=0.1 seconds: this
             # runs on every heartbeat tick, so that sleep was a guaranteed
             # 100ms stall each time for no accuracy benefit here.
             "used_pct": round(psutil.cpu_percent(interval=None), 1),

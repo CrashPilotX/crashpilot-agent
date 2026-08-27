@@ -1,4 +1,4 @@
-"""GPU telemetry collector — NVIDIA and AMD."""
+"""GPU telemetry collector: NVIDIA and AMD."""
 
 from __future__ import annotations
 

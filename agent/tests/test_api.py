@@ -24,7 +24,7 @@ def tmp_db(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def client(tmp_db):
-    """Authenticated TestClient — all requests carry the agent Bearer token."""
+    """Authenticated TestClient: all requests carry the agent Bearer token."""
     from crashpilot.api.server import app, get_agent_token
     from crashpilot.storage.store import init_db
     init_db()
@@ -39,7 +39,7 @@ def client(tmp_db):
 
 @pytest.fixture()
 def unauthed_client(tmp_db):
-    """Unauthenticated TestClient — no auth headers sent."""
+    """Unauthenticated TestClient: no auth headers sent."""
     from crashpilot.api.server import app
     from crashpilot.storage.store import init_db
     init_db()
@@ -229,7 +229,7 @@ class TestListReports:
         assert data["total"] == len(data["reports"])
 
     def test_no_raw_telemetry_in_list(self, client, saved_report):
-        """List endpoint must not expose telemetry — only summary fields."""
+        """List endpoint must not expose telemetry: only summary fields."""
         report = client.get("/api/v1/reports").json()["reports"][0]
         assert "telemetry" not in report
         assert "telemetry_summary" not in report

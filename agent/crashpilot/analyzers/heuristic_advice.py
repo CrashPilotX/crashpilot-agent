@@ -1,9 +1,9 @@
 """
-Built-in remediation knowledge base — makes the no-API-key experience useful.
+Built-in remediation knowledge base: makes the no-API-key experience useful.
 
 When no Anthropic key is configured, CrashPilot still detects the crash type
 heuristically. This module turns that classification into a plain-English root
-cause, concrete remediation steps, and monitoring suggestions — so the free /
+cause, concrete remediation steps, and monitoring suggestions: so the free /
 keyless path gives real, actionable answers instead of just a label.
 
 Keyed by CrashType.value (see crash_detector.CrashType).
@@ -129,7 +129,7 @@ _ADVICE: dict[str, dict[str, Any]] = {
         ],
     },
     "power_loss": {
-        "root_cause": "The machine lost power or was hard-reset — no clean shutdown record was written for the previous boot.",
+        "root_cause": "The machine lost power or was hard-reset: no clean shutdown record was written for the previous boot.",
         "remediation": [
             {
                 "priority": 1,
@@ -176,7 +176,7 @@ _ADVICE: dict[str, dict[str, Any]] = {
         "contributing_factors": ["A buggy driver holding a spinlock.", "Faulty hardware."],
     },
     "soft_lockup": {
-        "root_cause": "A CPU was stuck on a task for too long (soft lockup / RCU stall / hung task) — often a precursor to a hard hang.",
+        "root_cause": "A CPU was stuck on a task for too long (soft lockup / RCU stall / hung task): often a precursor to a hard hang.",
         "remediation": [
             {
                 "priority": 1,
@@ -231,7 +231,7 @@ _ADVICE: dict[str, dict[str, Any]] = {
             {
                 "priority": 2,
                 "action": "Back up critical data now, then plan a replacement.",
-                "rationale": "Disk errors tend to accelerate — act before total failure.",
+                "rationale": "Disk errors tend to accelerate: act before total failure.",
             },
             {
                 "priority": 3,
@@ -246,7 +246,7 @@ _ADVICE: dict[str, dict[str, Any]] = {
         "contributing_factors": ["An aging or failing drive.", "A bad cable or controller."],
     },
     "machine_check_exception": {
-        "root_cause": "The CPU raised a Machine Check Exception — a hardware-level error (memory, CPU, or bus).",
+        "root_cause": "The CPU raised a Machine Check Exception: a hardware-level error (memory, CPU, or bus).",
         "remediation": [
             {
                 "priority": 1,
@@ -271,7 +271,7 @@ _ADVICE: dict[str, dict[str, Any]] = {
         "contributing_factors": ["Failing RAM.", "Overheating or an unstable overclock."],
     },
     "clean_shutdown": {
-        "root_cause": "The previous boot ended with a normal, clean shutdown — no crash.",
+        "root_cause": "The previous boot ended with a normal, clean shutdown: no crash.",
         "remediation": [],
         "monitoring_suggestions": [],
         "contributing_factors": [],

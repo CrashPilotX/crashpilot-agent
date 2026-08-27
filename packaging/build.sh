@@ -2,7 +2,7 @@
 # Build a self-contained CrashPilot binary and Ubuntu .deb package.
 #
 # The agent pulls in native wheels (pydantic-core, psutil, uvloop), so we ship a
-# PyInstaller one-file binary that bundles Python + all deps — no python3 needed
+# PyInstaller one-file binary that bundles Python + all deps: no python3 needed
 # on the target. nfpm then wraps it with the systemd units
 # and a default config.
 #
@@ -10,7 +10,7 @@
 # Output: dist/crashpilot (binary), dist/*.deb, dist/SHA256SUMS
 #
 # NOTE: this is the first packaging pass. PyInstaller hidden-import coverage may
-# need tuning on the first real CI run — see packaging/README.md.
+# need tuning on the first real CI run: see packaging/README.md.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -66,7 +66,7 @@ done
 # 4. Default config (nfpm marks it config|noreplace so upgrades don't clobber it)
 cat > "$STAGE/etc/crashpilot/.env" <<'ENVEOF'
 # CrashPilot configuration
-# AI root-cause analysis is OPTIONAL — heuristic analysis works without a key.
+# AI root-cause analysis is OPTIONAL: heuristic analysis works without a key.
 # CRASHPILOT_ANTHROPIC_API_KEY=sk-ant-...
 #
 # Push mode (connect to the dashboard) is configured by `crashpilot configure`.

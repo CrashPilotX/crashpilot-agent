@@ -1,0 +1,99 @@
+name: Container and Kubernetes CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  docker-smoke:
+    name: Docker Ubuntu ${{ matrix.ubuntu }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ["22.04", "24.04"]
+    env:
+      IMAGE_TAG: crashpilot-ci:${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.ubuntu }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          build-args: UBUNTU_VERSION=${{ matrix.ubuntu }}
+          load: true
+          tags: ${{ env.IMAGE_TAG }}
+
+      - name: CLI and API smoke test
+        run: |
+          image="${IMAGE_TAG}"
+          docker run --rm --entrypoint crashpilot "$image" --help
+          docker run --rm --entrypoint crashpilot \
+            -e CRASHPILOT_DATA_DIR=/tmp/crashpilot \
+            -e CRASHPILOT_DB_PATH=/tmp/crashpilot/crashpilot.db \
+            "$image" snapshot --quiet
+          docker run --rm --entrypoint /opt/crashpilot/venv/bin/python "$image" -c \
+            'import asyncio; from crashpilot.collectors.platform import PlatformType, detect_platform; info = asyncio.run(detect_platform()); assert info.platform is PlatformType.CONTAINER and info.supported'
+          # The runtime image must not ship pip - it is a build-only tool and
+          # leaving it in the final layer widens the attack surface.
+          docker run --rm --entrypoint /usr/bin/test "$image" \
+            ! -e /opt/crashpilot/venv/bin/pip
+          cid="$(docker run -d -p 17878:7878 "$image")"
+          trap 'docker logs "$cid"; docker rm -f "$cid"' EXIT
+          for _ in {1..30}; do
+            if curl -fsS "http://127.0.0.1:17878/health"; then break; fi
+            sleep 1
+          done
+          curl -fsS "http://127.0.0.1:17878/health" | grep -q '"status":"ok"'
+
+      - name: Validate Compose model
+        if: matrix.ubuntu == '24.04'
+        run: docker compose -f docker/compose.yaml config
+
+  kubernetes-kind:
+    name: Kubernetes DaemonSet (Kind)
+    runs-on: ubuntu-latest
+    env:
+      KIND_IMAGE_TAG: crashpilot:kind-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f docker/Dockerfile -t "${KIND_IMAGE_TAG}" .
+
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: crashpilot-ci
+
+      - name: Load image into cluster
+        run: kind load docker-image "${KIND_IMAGE_TAG}" --name crashpilot-ci
+
+      - name: Deploy node agent
+        run: |
+          sed \
+            -e "s|ghcr.io/kdigitalsystems/crashpilot:latest|${KIND_IMAGE_TAG}|" \
+            -e 's|imagePullPolicy: IfNotPresent|imagePullPolicy: Never|' \
+            k8s/daemonset.yaml > /tmp/crashpilot-daemonset.yaml
+          kubectl apply --dry-run=client -f /tmp/crashpilot-daemonset.yaml
+          kubectl apply -f /tmp/crashpilot-daemonset.yaml
+          kubectl rollout status daemonset/crashpilot-agent -n crashpilot --timeout=180s
+          kubectl get pods -n crashpilot -o wide
+          kubectl logs -n crashpilot -l app.kubernetes.io/name=crashpilot --tail=50

@@ -114,7 +114,7 @@ class TestSettings:
         assert s1 is s2
 
     def test_db_path_is_not_current_directory(self):
-        """Regression: Path('') == PosixPath('.') bug — db_path must not be '.'"""
+        """Regression: Path('') == PosixPath('.') bug: db_path must not be '.'"""
         from crashpilot.config import get_settings
         cfg = get_settings()
         assert cfg.db_path != Path(".")

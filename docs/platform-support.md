@@ -69,7 +69,7 @@ Ubuntu node instead.
 
 ## CI gates
 
-- `Tests`: Python 3.10–3.12 behavior.
+- `Tests`: Python 3.10-3.12 behavior.
 - `Platform CI`: Ubuntu 22.04/24.04 job containers, amd64/arm64, systemd units,
   and self-contained package builds.
 - `Container and Kubernetes CI`: Docker/OCI images, Compose, Kind deployment,

@@ -1,0 +1,141 @@
+name: OS Compatibility Matrix
+
+# Nightly check of whether the agent installs and its CLI runs cleanly
+# (no unhandled traceback) on distros beyond the officially-supported
+# Ubuntu/WSL/Docker/Kubernetes targets documented in the README. This is
+# deliberately NOT a crash-detection test - containers share the host
+# kernel (no real reboot, no real dmesg boot history) and have no real
+# hardware sensors (SMART/thermal/GPU), so it can only prove "installs
+# cleanly and every collector degrades gracefully here", not "crash
+# detection verified on this distro". The README table is worded to match
+# that scope - don't strengthen the claim without also strengthening what
+# this job actually checks.
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compat:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 22.04
+            image: ubuntu:22.04
+            manager: apt
+          - name: Ubuntu 24.04
+            image: ubuntu:24.04
+            manager: apt
+          - name: Debian 12
+            image: debian:12
+            manager: apt
+          - name: Fedora 41
+            image: fedora:41
+            manager: dnf
+          - name: Alpine 3.20
+            image: alpine:3.20
+            manager: apk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install and smoke-test the agent on ${{ matrix.name }}
+        id: smoke
+        env:
+          MATRIX_NAME: ${{ matrix.name }}
+          MATRIX_IMAGE: ${{ matrix.image }}
+          MATRIX_MANAGER: ${{ matrix.manager }}
+        run: |
+          mkdir -p compat-result
+
+          case "$MATRIX_MANAGER" in
+            apt)
+              install_cmd='export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq python3 python3-pip python3-venv build-essential >/dev/null'
+              ;;
+            dnf)
+              install_cmd='dnf install -y -q python3 python3-pip gcc python3-devel >/dev/null'
+              ;;
+            apk)
+              install_cmd='apk add --no-cache -q python3 py3-pip gcc musl-dev python3-dev linux-headers'
+              ;;
+          esac
+
+          # The runner's own Docker daemon is local, so a bind mount of the
+          # checked-out source resolves correctly here.
+          set +e
+          docker run --rm -v "${PWD}/agent:/agent:ro" "$MATRIX_IMAGE" sh -c "
+            set -e
+            ${install_cmd}
+            python3 -m venv /tmp/venv
+            . /tmp/venv/bin/activate
+            pip install --quiet /agent
+            export CRASHPILOT_DATA_DIR=/tmp/crashpilot-data
+            export CRASHPILOT_DB_PATH=/tmp/crashpilot-data/crashpilot.db
+            crashpilot --help >/dev/null
+            crashpilot snapshot --quiet
+          "
+          exit_code=$?
+          set -e
+
+          if [ "$exit_code" -eq 0 ]; then
+            status=pass
+          else
+            status=fail
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          STATUS="$status" python3 - <<'PYEOF' > compat-result/result.json
+          import json, os
+          print(json.dumps({
+              "name": os.environ["MATRIX_NAME"],
+              "image": os.environ["MATRIX_IMAGE"],
+              "status": os.environ["STATUS"],
+          }))
+          PYEOF
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-result-${{ matrix.manager }}-${{ strategy.job-index }}
+          path: compat-result/result.json
+          retention-days: 7
+
+  publish-matrix:
+    name: Update README compatibility table
+    needs: compat
+    if: always()
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: compat-result-*
+          path: compat-results
+          merge-multiple: false
+
+      - name: Render compatibility table into README
+        run: python3 ci/render_compat_matrix.py compat-results README.md
+
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- README.md; then
+            echo "No change to the compatibility table."
+            exit 0
+          fi
+          git add README.md
+          git commit -m "chore: nightly OS compatibility matrix update"
+          git push origin HEAD:main

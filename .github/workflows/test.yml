@@ -1,0 +1,72 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: agent/pyproject.toml
+
+      - name: Install package and dev dependencies
+        working-directory: agent
+        run: pip install -e ".[dev]"
+
+      - name: Lint with ruff
+        working-directory: agent
+        run: ruff check crashpilot/ tests/
+
+      - name: Type-check with mypy
+        working-directory: agent
+        run: mypy crashpilot/
+
+      - name: Run tests
+        working-directory: agent
+        env:
+          CRASHPILOT_ANTHROPIC_API_KEY: ""
+        run: pytest tests/ -v --tb=short
+
+      - name: Enforce minimum coverage
+        if: matrix.python == '3.12'
+        working-directory: agent
+        env:
+          CRASHPILOT_ANTHROPIC_API_KEY: ""
+        run: |
+          pip install pytest-cov
+          # Floor set a few points below the current baseline so this catches
+          # real regressions without being brittle. Raise it as coverage
+          # improves, never lower it silently.
+          pytest tests/ --cov=crashpilot --cov-report=term-missing --cov-fail-under=60 -q
+
+  shellcheck:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint install.sh and packaging scripts
+        run: |
+          shellcheck -S warning agent/install.sh
+          shellcheck -S warning packaging/*.sh

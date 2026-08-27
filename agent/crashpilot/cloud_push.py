@@ -1,5 +1,5 @@
 """
-Cloud push — sends heartbeats and crash reports directly to Supabase.
+Cloud push: sends heartbeats and crash reports directly to Supabase.
 
 Used in push mode (no public URL required). The agent authenticates using
 the system_id + supabase_token pair, validated server-side by SECURITY DEFINER
@@ -30,16 +30,16 @@ _TIMEOUT = httpx.Timeout(10.0)
 _LIVE_DMESG_TTL_SECONDS = 300
 _LIVE_DMESG_TAIL_CHARS = 800
 _LIVE_DMESG_MAX_CRITICAL = 10
-_HARDWARE_PROFILE_TTL_SECONDS = 86400  # 24 h — hardware almost never changes
+_HARDWARE_PROFILE_TTL_SECONDS = 86400  # 24 h: hardware almost never changes
 
 # Per-section send intervals for stable heartbeat sections.
 # Live metrics (cpu/memory/disk/gpu/network) are always included.
-_DMESG_SECTION_TTL_SECS         = 1800  # every 30 min — live incident hints
-_FLIGHT_RECORDER_SECTION_TTL_SECS = 3600  # every 60 min — 6-hour window summary
-_AGENT_HEALTH_SECTION_TTL_SECS  = 3600  # every 60 min — version/timer states
-_HARDWARE_SECTION_TTL_SECS      = 86400 # every 24 h — static CPU/memory/disk profile
-_LIVE_METRICS_SECTION_TTL_SECS  = 900   # every 15 min — keep one-minute ticks tiny
-_CLOUD_STATUS_TTL_SECS          = 1800  # every 30 min — remote update/maintenance poll
+_DMESG_SECTION_TTL_SECS         = 1800  # every 30 min: live incident hints
+_FLIGHT_RECORDER_SECTION_TTL_SECS = 3600  # every 60 min: 6-hour window summary
+_AGENT_HEALTH_SECTION_TTL_SECS  = 3600  # every 60 min: version/timer states
+_HARDWARE_SECTION_TTL_SECS      = 86400 # every 24 h: static CPU/memory/disk profile
+_LIVE_METRICS_SECTION_TTL_SECS  = 900   # every 15 min: keep one-minute ticks tiny
+_CLOUD_STATUS_TTL_SECS          = 1800  # every 30 min: remote update/maintenance poll
 _LIVE_DMESG_PATTERN = re.compile(
     "|".join([
         r"Kernel panic",
@@ -522,7 +522,7 @@ def _systemctl_unit_state(unit: str) -> tuple[str | None, str | None]:
     """Return (active_state, enabled_state) for one unit via a single call.
 
     `_build_agent_health` used to spend two `_systemctl_state` subprocess
-    spawns per unit (is-active, is-enabled) across three units — six spawns
+    spawns per unit (is-active, is-enabled) across three units: six spawns
     every heartbeat tick. `systemctl show --property=` returns both in one
     call per unit, so this halves that to three.
     """
@@ -828,9 +828,9 @@ def _check_egress_budget() -> tuple[str, int, int]:
     """Return (mode, bytes_used_today, hard_limit_bytes).
 
     mode is one of:
-      "normal" — under soft limit; send full payload including stable sections
-      "slim"   — over soft limit but under hard limit; live metrics only
-      "skip"   — over hard limit; send a tiny status-only heartbeat
+      "normal": under soft limit; send full payload including stable sections
+      "slim"  : over soft limit but under hard limit; live metrics only
+      "skip"  : over hard limit; send a tiny status-only heartbeat
     """
     hard_limit = _egress_daily_limit_bytes()
     soft_limit = _egress_soft_limit_bytes()
@@ -1182,9 +1182,9 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
     # ── Stable sections with per-section TTLs ─────────────────────────────────
     # The Supabase upsert merges metrics (COALESCE || patch) so absent keys are
     # preserved from the previous heartbeat.  Each section is only included when
-    # its TTL has expired, keeping most ticks at ~3–5 KB.
+    # its TTL has expired, keeping most ticks at ~3-5 KB.
     # In slim mode (soft egress limit reached) all stable sections are skipped
-    # outright — the dashboard still sees their last-sent values via the merge.
+    # outright: the dashboard still sees their last-sent values via the merge.
     section_path = _section_ttl_path()
     sent_at = _load_section_ttl(section_path)
     now = time.time()
@@ -1195,13 +1195,13 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
             metrics["hardware_profile"] = _build_hardware_profile_metrics()
             updates["hardware_profile"] = now
 
-        # dmesg — collect every tick (uses 5-min file cache), include only when due.
+        # dmesg: collect every tick (uses 5-min file cache), include only when due.
         dmesg = _collect_live_dmesg()
         if now - sent_at.get("dmesg", 0) >= _DMESG_SECTION_TTL_SECS:
             metrics["dmesg"] = dmesg
             updates["dmesg"] = now
 
-        # flight_recorder — record a snapshot every tick for accuracy, include
+        # flight_recorder: record a snapshot every tick for accuracy, include
         # the window summary only when due.
         try:
             from .flight_recorder import record_snapshot, summarize_window
@@ -1215,7 +1215,7 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
                 metrics["flight_recorder"] = {"error": str(exc)}
                 updates["flight_recorder"] = now
 
-        # agent_health — version, timer states, tool availability; include when due.
+        # agent_health: version, timer states, tool availability; include when due.
         if now - sent_at.get("agent_health", 0) >= _AGENT_HEALTH_SECTION_TTL_SECS:
             metrics["agent_health"] = _build_agent_health(dmesg)
             updates["agent_health"] = now
@@ -1273,7 +1273,7 @@ def _explain_http_error(exc: httpx.HTTPStatusError) -> str:
     """Turn a Supabase REST error into an actionable message.
 
     Supabase returns useful JSON in the body (code/message/hint) that
-    raise_for_status() drops — surface it so the user can self-diagnose.
+    raise_for_status() drops: surface it so the user can self-diagnose.
     """
     resp = exc.response
     body = (resp.text or "").strip()
@@ -1288,7 +1288,7 @@ def _explain_http_error(exc: httpx.HTTPStatusError) -> str:
         )
     if status in (401, 403):
         return (
-            f"HTTP {status}: Supabase rejected the request — check that "
+            f"HTTP {status}: Supabase rejected the request: check that "
             f"CRASHPILOT_SUPABASE_ANON_KEY in /etc/crashpilot/.env matches your "
             f"project's anon key.\n  Server said: {body}"
         )
@@ -1347,7 +1347,7 @@ async def push_heartbeat(
     elif live_metrics_due:
         # _build_live_metrics does substantial synchronous work (subprocess
         # calls for dmesg/hardware/systemctl, a flight-recorder snapshot, and
-        # — when its cache is stale — a speedtest-cli run with up to a 90s
+        #: when its cache is stale: a speedtest-cli run with up to a 90s
         # timeout). Run it off the event loop so a slow tick doesn't stall
         # anything else this process is doing concurrently (e.g. the local
         # API server) for the length of that call.
@@ -1432,7 +1432,7 @@ async def push_heartbeat(
     return response_data
 
 
-# Caps for what we send to the cloud — enough to be useful, small enough for JSONB.
+# Caps for what we send to the cloud: enough to be useful, small enough for JSONB.
 _DMESG_TAIL_CHARS = 8000
 _JOURNAL_SNIPPET_CHARS = 4000
 _MAX_CRITICAL_EVENTS = 80
@@ -1450,7 +1450,7 @@ def _build_telemetry_summary(telemetry: dict[str, Any]) -> dict[str, Any]:
         "dmesg": {
             "critical_events": (dmesg.get("critical_events") or [])[:_MAX_CRITICAL_EVENTS],
             "critical_count": dmesg.get("critical_count", 0),
-            # Keep the tail (most recent lines) — that's where the crash shows up.
+            # Keep the tail (most recent lines): that's where the crash shows up.
             "tail": (dmesg.get("full_tail") or "")[-_DMESG_TAIL_CHARS:],
             "mce_events": (dmesg.get("mce_events") or "")[:_JOURNAL_SNIPPET_CHARS],
         },

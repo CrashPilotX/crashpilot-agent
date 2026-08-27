@@ -34,7 +34,7 @@ The Debian package recommends `smartmontools`, `lm-sensors`, and
 `speedtest-cli`. CrashPilot works without them, but they improve disk health,
 temperature, and internet-capacity telemetry.
 
-Binary size around 30–60 MB is normal for a bundled-Python one-file binary.
+Binary size around 30-60 MB is normal for a bundled-Python one-file binary.
 Artifact signing remains a future hardening item.
 
 ## Local build
