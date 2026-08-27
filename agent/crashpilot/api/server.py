@@ -114,7 +114,7 @@ async def health() -> dict:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/v1/reports")
-async def list_crash_reports(
+def list_crash_reports(
     limit: int = Query(default=20, ge=1, le=100),
     _: str = Depends(_require_token),
 ) -> dict[str, Any]:
@@ -142,7 +142,7 @@ async def list_crash_reports(
 
 
 @app.get("/api/v1/reports/{report_id}")
-async def get_crash_report(
+def get_crash_report(
     report_id: str,
     _: str = Depends(_require_token),
 ) -> dict[str, Any]:
@@ -190,7 +190,7 @@ async def get_crash_report(
 
 
 @app.delete("/api/v1/reports/{report_id}")
-async def delete_crash_report(
+def delete_crash_report(
     report_id: str,
     _: str = Depends(_require_token),
 ) -> Response:
@@ -201,7 +201,7 @@ async def delete_crash_report(
 
 
 @app.get("/api/v1/status")
-async def get_status(_: str = Depends(_require_token)) -> dict[str, Any]:
+def get_status(_: str = Depends(_require_token)) -> dict[str, Any]:
     """Agent status and configuration summary."""
     from ..storage.store import get_meta
     cfg = get_settings()
