@@ -117,15 +117,15 @@ Requires Python 3.10+ and Linux kernel 5.4+. See the [full platform support matr
 A scheduled job installs the agent fresh and runs its CLI smoke test inside a plain container of each distro below every night, to catch packaging and dependency regressions early on distros beyond the officially supported list above.
 
 <!-- COMPAT-MATRIX:START -->
-_Last checked: 2026-08-27 17:37 UTC. This checks that the agent installs and its CLI runs without an unhandled error inside a plain container on each distro - containers have no real reboot, no real dmesg boot history, and no real hardware sensors, so this is not a claim that crash detection itself was verified there. See [Supported distributions](#supported-distributions) for what is actually supported end to end._
+_Last checked: 2026-08-27 17:42 UTC. This checks that the agent installs and its CLI runs without an unhandled error inside a plain container on each distro - containers have no real reboot, no real dmesg boot history, and no real hardware sensors, so this is not a claim that crash detection itself was verified there. See [Supported distributions](#supported-distributions) for what is actually supported end to end._
 
 | Distro | Install + CLI smoke test |
 |---|---|
-| Alpine 3.20 | FAIL |
-| Debian 12 | FAIL |
-| Fedora 41 | FAIL |
-| Ubuntu 22.04 | FAIL |
-| Ubuntu 24.04 | FAIL |
+| Alpine 3.20 | PASS |
+| Debian 12 | PASS |
+| Fedora 41 | PASS |
+| Ubuntu 22.04 | PASS |
+| Ubuntu 24.04 | PASS |
 <!-- COMPAT-MATRIX:END -->
 
 ## Development
