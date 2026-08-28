@@ -61,12 +61,22 @@ jobs:
           # improves, never lower it silently.
           pytest tests/ --cov=crashpilot --cov-report=term-missing --cov-fail-under=60 -q
 
-  shellcheck:
-    name: Shell scripts
+  contracts:
+    name: Installer and packaging contracts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Lint install.sh and packaging scripts
         run: |
           shellcheck -S warning agent/install.sh
           shellcheck -S warning packaging/*.sh
+
+      # These assert the things a broken release would otherwise only reveal on
+      # a user's machine: the installer's argument handling and systemd unit
+      # wiring, and that the nfpm/postinstall/build scripts stay consistent.
+      - name: Installer contract
+        run: python3 ci/test_installer.py
+
+      - name: Packaging contract
+        run: python3 ci/check_packaging.py
