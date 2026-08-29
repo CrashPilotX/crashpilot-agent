@@ -14,20 +14,51 @@ if [[ -n "$_src" && "$_src" != "bash" && -f "$_src" ]]; then
 fi
 
 if [[ -z "${REPO_DIR:-}" || ! -f "$REPO_DIR/agent/pyproject.toml" ]]; then
-  # curl-pipe install: fetch the public agent bundle. The GitHub repository may
-  # stay private; the website publishes just the installable agent files.
-  CLONE_DIR="$(mktemp -d)/CrashPilot"
+  # curl-pipe install: fetch the agent bundle the website publishes, which is
+  # built from a pinned commit of this repository.
+  BUNDLE_PARENT="$(mktemp -d)"
+  CLONE_DIR="$BUNDLE_PARENT/CrashPilot"
   BUNDLE_URL="${CRASHPILOT_BUNDLE_URL:-https://crashpilotx.com/crashpilot-agent.tar.gz}"
+  BUNDLE_SHA_URL="${CRASHPILOT_BUNDLE_SHA_URL:-${BUNDLE_URL}.sha256}"
   echo "[info]  Standalone installer detected: downloading agent bundle..."
-  if command -v curl &>/dev/null && command -v tar &>/dev/null; then
-    mkdir -p "$(dirname "$CLONE_DIR")"
-    curl -fsSL "$BUNDLE_URL" | tar -xz -C "$(dirname "$CLONE_DIR")" \
-      || { echo "[err ]  agent bundle download failed: $BUNDLE_URL"; exit 1; }
-  else
+
+  if ! command -v curl &>/dev/null || ! command -v tar &>/dev/null; then
     echo "[err ]  curl and tar are required for curl-pipe installs. Install them with:"
     echo "        sudo apt-get install curl tar"
     exit 1
   fi
+  # This bundle is unpacked and installed as root, so a corrupted or
+  # substituted download is not something to find out about later. Verification
+  # is mandatory rather than best effort: with no sha256sum there is no way to
+  # check, so stop rather than install something unverified.
+  if ! command -v sha256sum &>/dev/null; then
+    echo "[err ]  sha256sum is required to verify the agent bundle. Install it with:"
+    echo "        sudo apt-get install coreutils"
+    exit 1
+  fi
+
+  # Download to a file rather than piping into tar: a stream cannot be checked
+  # until it has already been extracted.
+  BUNDLE_FILE="$BUNDLE_PARENT/crashpilot-agent.tar.gz"
+  curl -fsSL "$BUNDLE_URL" -o "$BUNDLE_FILE" \
+    || { echo "[err ]  agent bundle download failed: $BUNDLE_URL"; exit 1; }
+  curl -fsSL "$BUNDLE_SHA_URL" -o "${BUNDLE_FILE}.sha256" \
+    || { echo "[err ]  agent bundle checksum download failed: $BUNDLE_SHA_URL"; exit 1; }
+
+  # The published .sha256 is in sha256sum's own format and names the tarball,
+  # so check it from the directory holding both files.
+  if ! ( cd "$BUNDLE_PARENT" && sha256sum -c crashpilot-agent.tar.gz.sha256 >/dev/null 2>&1 ); then
+    echo "[err ]  agent bundle failed checksum verification."
+    echo "        Expected: $(cut -d' ' -f1 < "${BUNDLE_FILE}.sha256")"
+    echo "        Actual:   $(sha256sum "$BUNDLE_FILE" | cut -d' ' -f1)"
+    echo "        Refusing to install. Retry, and report this if it persists."
+    exit 1
+  fi
+  echo "[ok  ]  agent bundle checksum verified"
+
+  tar -xzf "$BUNDLE_FILE" -C "$BUNDLE_PARENT" \
+    || { echo "[err ]  agent bundle could not be extracted"; exit 1; }
+
   REPO_DIR="$CLONE_DIR"
   if [[ ! -f "$REPO_DIR/agent/pyproject.toml" ]]; then
     echo "[err ]  downloaded bundle did not contain the CrashPilot agent"

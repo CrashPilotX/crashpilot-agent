@@ -51,6 +51,17 @@ def main() -> None:
     require(script, 'PKG_MGR="apt"', "Ubuntu apt path should remain the only package manager path")
     require(script, "https://crashpilotx.com/crashpilot-agent.tar.gz", "curl-pipe installs should use the public website bundle")
     require(script, "agent bundle download failed", "bundle failures should be explicit")
+
+    # The bundle is unpacked and installed as root, so it must be checked
+    # against the published digest before anything is extracted. A streamed
+    # `curl | tar` cannot be verified, because it is already extracted by the
+    # time the bytes could be checked.
+    require(script, "sha256sum -c", "curl-pipe installs must verify the bundle against its published checksum")
+    require(script, "failed checksum verification", "a checksum mismatch should be reported explicitly")
+    if "curl -fsSL \"$BUNDLE_URL\" | tar" in script:
+        raise AssertionError(
+            "bundle must be downloaded to a file and verified, not piped straight into tar"
+        )
     require(script, '[[ ! -t 0 ]]', "curl-pipe installs must not prompt from stdin")
     require(script, "Non-interactive install detected", "non-interactive installs should skip optional package prompts")
     require(script, 'WSL with systemd detected', "WSL2 with systemd should install the heartbeat timer")
