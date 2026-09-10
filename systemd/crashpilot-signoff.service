@@ -1,0 +1,21 @@
+[Unit]
+Description=CrashPilotX sign-off on clean shutdown
+Documentation=https://crashpilotx.com/docs
+# Started after the network, so systemd stops it (running ExecStop) before
+# the network goes down and the sign-off can still reach the dashboard.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+# Tells the dashboard to expect silence, so a clean shutdown, reboot, or
+# scale-in shows as "Shut down cleanly" instead of an unexplained outage. The
+# next heartbeat undoes it. Never fails the stop: sign-off always exits 0.
+ExecStop=__CRASHPILOT_BIN__ sign-off --quiet
+# A dead network must never hold up a shutdown.
+TimeoutStopSec=8
+
+[Install]
+WantedBy=multi-user.target

@@ -101,6 +101,18 @@ sudo crashpilot configure cpilot_<your-connection-string>
 
 The agent authenticates with a `system_id` + `agent_token` pair stored in `/etc/crashpilot/.env` (mode `0600`). Writes go through `SECURITY DEFINER` Postgres RPCs that validate the token server-side, so the public anon key alone cannot modify data.
 
+### Automated fleets
+
+For machines that come and go on their own (autoscaling groups, spot instances, CI runners, Kubernetes nodes), create a **join token** on the dashboard's Systems page instead. Every machine enrolls itself with it at first boot:
+
+```bash
+curl -fsSL https://crashpilotx.com/install.sh | sudo bash -s -- --enroll 'cpjoin_<your-join-token>'
+# or, with the agent already installed:
+sudo crashpilot enroll 'cpjoin_<your-join-token>'
+```
+
+Each machine enrolls under a stable identity: `--external-id` if you pass one, otherwise the Kubernetes node name, the cloud instance ID (AWS IMDSv2, GCP, Azure), or `/etc/machine-id`. That identity is saved, so a reinstall or a pod restart carries on as the same system rather than creating a new one. On a clean shutdown the agent signs off (`crashpilot-signoff.service`, or the DaemonSet's `preStop` hook), so the dashboard shows the machine as shut down rather than offline. Machines enrolled with an ephemeral token are retired automatically once they are gone, keeping their history until retention ends. See [k8s/README.md](k8s/README.md) for the DaemonSet.
+
 ## Supported distributions
 
 | Environment | Versions / architectures | Status |
