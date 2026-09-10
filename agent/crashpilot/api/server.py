@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 from contextlib import asynccontextmanager
 from typing import Any
@@ -35,13 +36,25 @@ def _token_file():
 
 
 def get_agent_token() -> str:
-    """Return the persistent API token, creating it on first call."""
+    """Return the persistent API token, creating it on first call.
+
+    The file is created 0600 in one step (not written, then chmod-ed, which
+    left it readable for a moment), and re-tightened on every read: installer
+    versions before this one ran a recursive chmod a+rX over the install
+    directory, leaving the token world-readable on existing machines.
+    """
     tf = _token_file()
     if tf.exists():
+        try:
+            if tf.stat().st_mode & 0o077:
+                tf.chmod(0o600)
+        except OSError:
+            log.warning("Could not tighten permissions on %s", tf)
         return tf.read_text().strip()
     token = secrets.token_urlsafe(32)
-    tf.write_text(token)
-    tf.chmod(0o600)
+    fd = os.open(tf, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(token)
     log.info("Generated new API token: run `sudo crashpilot token` to view it")
     return token
 

@@ -352,3 +352,37 @@ class TestStatus:
         for crash in data["recent_crashes"]:
             for field in ("id", "crash_type", "detected_at", "severity"):
                 assert field in crash, f"Missing crash field: {field}"
+
+
+class TestAgentTokenFile:
+    """The local API token grants control of a root-run API, so its file must
+    never be readable by other users."""
+
+    def test_new_token_file_is_private(self, tmp_db):
+        import os
+        import stat
+
+        import crashpilot.config as cfg_mod
+        from crashpilot.api import server
+
+        cfg_mod._settings = None
+        token = server.get_agent_token()
+        mode = stat.S_IMODE(os.stat(server._token_file()).st_mode)
+        assert token
+        assert mode == 0o600, oct(mode)
+
+    def test_loosened_token_file_is_re_tightened_on_read(self, tmp_db):
+        # Installers before the hardening ran `chmod -R a+rX` over the install
+        # directory, leaving existing tokens world-readable. Reading repairs it.
+        import os
+        import stat
+
+        import crashpilot.config as cfg_mod
+        from crashpilot.api import server
+
+        cfg_mod._settings = None
+        server.get_agent_token()
+        path = server._token_file()
+        os.chmod(path, 0o644)
+        server.get_agent_token()
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
