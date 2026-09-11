@@ -7,7 +7,6 @@ import stat
 from pathlib import Path
 from typing import Optional
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +32,27 @@ def _find_env_file() -> Path:
             return p
     # Default (may not exist yet: pydantic-settings silently skips missing files)
     return Path.home() / ".config" / "crashpilot" / ".env"
+
+
+class InsecureSupabaseURL(ValueError):
+    """The Supabase URL is not https://, so nothing is sent to it."""
+
+
+def require_https(url: str) -> str:
+    """The Supabase URL, if it is https://.
+
+    Every call to it carries the agent token. configure and join tokens
+    already insist on https://, and a URL set in the environment (a
+    Kubernetes Secret, a docker .env) must not bypass that. Checked where
+    requests are made rather than when settings load, so a bad URL stops
+    uploads without also stopping local crash analysis.
+    """
+    if not url.lower().startswith("https://"):
+        raise InsecureSupabaseURL(
+            "CRASHPILOT_SUPABASE_URL must start with https:// (refusing to send the agent "
+            "token in plaintext). Fix it in the environment or .env."
+        )
+    return url
 
 
 _INSTALLER_DATA_DIR = Path("/opt/crashpilot/data")
@@ -155,19 +175,6 @@ class Settings(BaseSettings):
     # online, but detailed live metrics and status polling can run less often.
     live_metrics_interval_seconds: int = 900
     cloud_status_interval_seconds: int = 1800
-
-    @field_validator("supabase_url")
-    @classmethod
-    def _supabase_url_is_https(cls, value: str) -> str:
-        # Every heartbeat carries the agent token. configure and join tokens
-        # already insist on https://; a URL set in the environment (a
-        # Kubernetes Secret, a docker .env) must not bypass that.
-        if value and not value.lower().startswith("https://"):
-            raise ValueError(
-                "CRASHPILOT_SUPABASE_URL must start with https:// (refusing to send the agent "
-                "token in plaintext). Fix it in the environment or .env."
-            )
-        return value
 
     def model_post_init(self, __context: object) -> None:
         data_dir = self.data_dir or _default_data_dir()

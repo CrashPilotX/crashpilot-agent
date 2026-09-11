@@ -428,16 +428,18 @@ def _credentials_work(url: str, anon_key: str, system_id: str, agent_token: str)
     """Whether the stored credentials are accepted right now."""
     import httpx
 
+    from .config import InsecureSupabaseURL, require_https
+
     if not (url and anon_key and system_id and agent_token):
         return False
     try:
         resp = httpx.post(
-            f"{url.rstrip('/')}/rest/v1/rpc/agent_system_status",
+            f"{require_https(url).rstrip('/')}/rest/v1/rpc/agent_system_status",
             headers={"apikey": anon_key, "Authorization": f"Bearer {anon_key}"},
             json={"p_system_id": system_id, "p_agent_token": agent_token},
             timeout=10.0,
         )
-    except httpx.HTTPError:
+    except (httpx.HTTPError, InsecureSupabaseURL):
         return False
     return resp.status_code == 200
 
@@ -1000,7 +1002,14 @@ def doctor() -> None:
         ) if not val
     ]
     push_configured = not missing
-    if push_configured:
+    if push_configured and not cfg.supabase_url.lower().startswith("https://"):
+        # Nothing is sent to a plaintext URL (cloud_push refuses it), so the
+        # connection check below would only repeat this.
+        push_configured = False
+        report("Push mode configured", "fail", "CRASHPILOT_SUPABASE_URL is not https://",
+               "Uploads are refused so the agent token is never sent in plaintext; use the "
+               "https:// URL from the dashboard's connection string.")
+    elif push_configured:
         report("Push mode configured", "ok", f"system {cfg.supabase_system_id}")
     else:
         report("Push mode configured", "fail", "missing: " + ", ".join(missing),

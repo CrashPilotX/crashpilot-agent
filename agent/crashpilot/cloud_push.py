@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 import httpx
 
+from .config import require_https
 from .redaction import redact_value
 
 log = logging.getLogger(__name__)
@@ -1420,7 +1421,7 @@ async def push_heartbeat(
     # copies of process command lines and kernel log text.
     heartbeat_metrics, _ = redact_value(heartbeat_metrics)
 
-    url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_heartbeat"
+    url = f"{require_https(supabase_url).rstrip('/')}/rest/v1/rpc/agent_heartbeat"
     payload = {
         "p_system_id": system_id,
         "p_agent_token": agent_token,
@@ -1560,7 +1561,7 @@ async def push_report(
     if analysis.get("crash_type"):
         cloud_report["crash_type"] = analysis["crash_type"]
 
-    url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_push_report"
+    url = f"{require_https(supabase_url).rstrip('/')}/rest/v1/rpc/agent_push_report"
     rpc_payload = {
         "p_system_id": system_id,
         "p_agent_token": agent_token,

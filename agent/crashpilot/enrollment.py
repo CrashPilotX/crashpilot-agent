@@ -30,6 +30,8 @@ from typing import Any
 
 import httpx
 
+from .config import require_https
+
 log = logging.getLogger(__name__)
 
 JOIN_PREFIX = "cpjoin_"
@@ -393,7 +395,7 @@ def sign_off(url: str, anon_key: str, system_id: str, agent_token: str) -> None:
     agent cannot tell a reboot from a power-off or a pod rollout from a drain.
     """
     resp = httpx.post(
-        f"{url.rstrip('/')}/rest/v1/rpc/agent_sign_off",
+        f"{require_https(url).rstrip('/')}/rest/v1/rpc/agent_sign_off",
         headers=_headers(anon_key),
         json={"p_system_id": system_id, "p_agent_token": agent_token},
         timeout=_SIGN_OFF_TIMEOUT,

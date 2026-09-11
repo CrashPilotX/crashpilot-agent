@@ -173,16 +173,35 @@ class TestSettings:
         s2 = get_settings()
         assert s1 is s2
 
-    def test_a_plaintext_supabase_url_is_refused(self, monkeypatch):
+    def test_a_plaintext_supabase_url_is_never_sent_to(self, monkeypatch):
         # configure and join tokens already insist on https://, but a URL from
         # the environment (a Kubernetes Secret, a docker .env) was used as is,
-        # sending the agent token in plaintext.
+        # sending the agent token in plaintext. It is refused where requests
+        # are made, so settings still load and local analysis still runs.
+        import asyncio
+
         import crashpilot.config as cfg_mod
+        from crashpilot.cloud_push import push_heartbeat, push_report
+        from crashpilot.config import InsecureSupabaseURL
+        from crashpilot.enrollment import sign_off
 
         monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "http://abc.supabase.co")
         cfg_mod._settings = None
-        with pytest.raises(ValueError, match="CRASHPILOT_SUPABASE_URL must start with https://"):
-            cfg_mod.get_settings()
+        cfg = cfg_mod.get_settings()
+        assert cfg.supabase_url == "http://abc.supabase.co"
+
+        def _no_network(*_a, **_k):
+            raise AssertionError("a request was made to a plaintext URL")
+
+        monkeypatch.setattr("httpx.post", _no_network)
+        monkeypatch.setattr("httpx.AsyncClient.post", _no_network)
+        url = cfg.supabase_url
+        with pytest.raises(InsecureSupabaseURL, match="must start with https://"):
+            asyncio.run(push_heartbeat(supabase_url=url, anon_key="a", system_id="s", agent_token="t"))
+        with pytest.raises(InsecureSupabaseURL):
+            asyncio.run(push_report(supabase_url=url, anon_key="a", system_id="s", agent_token="t", report={}))
+        with pytest.raises(InsecureSupabaseURL):
+            sign_off(url, "a", "s", "t")
 
     def test_an_https_or_empty_supabase_url_is_fine(self, monkeypatch):
         import crashpilot.config as cfg_mod
