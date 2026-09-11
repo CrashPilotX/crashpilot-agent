@@ -39,6 +39,30 @@ def test_snapshot_reports_coverage_gaps_and_root_context():
     assert len(snapshot["fingerprint"]) == 16
 
 
+def test_snapshot_accepts_the_detectors_signal_dict():
+    # detect_crash_type puts hardware signals in a dict; slicing it like a
+    # list made every analysis with SMART or thermal signals fail.
+    from crashpilot.analyzers.crash_detector import detect_crash_type
+
+    telemetry = {
+        "journal": {"previous_boot_errors": "kernel: EXT4-fs error (device sda1): bad entry"},
+        "smart": {"critical_disks": [{"device": "/dev/sda", "health": "FAILED"}]},
+    }
+    result = detect_crash_type(telemetry)
+    assert result.signals == {"smart_critical_disks": 1}
+    detection = {
+        "crash_type": result.crash_type.value,
+        "evidence": result.evidence,
+        "signals": result.signals,
+    }
+
+    first = build_forensic_snapshot(telemetry, detection, [])
+    # Same signal, different reading: same failure.
+    second = build_forensic_snapshot(telemetry, {**detection, "signals": {"smart_critical_disks": 2}}, [])
+
+    assert first["fingerprint"] == second["fingerprint"]
+
+
 def test_snapshot_marks_missing_previous_boot_evidence():
     snapshot = build_forensic_snapshot(
         {"system": {}, "platform": {}},

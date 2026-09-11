@@ -121,12 +121,11 @@ def detect_crash_type(telemetry: dict[str, Any]) -> DetectionResult:
 
     # Aggregate all text evidence
     text_corpus = _build_corpus(telemetry)
-    lower_corpus = text_corpus.lower()
     line_sources = _line_source_map(telemetry)
 
     # Check clean shutdown first
     shutdown_hits = _match_patterns(CrashType.CLEAN_SHUTDOWN.value, text_corpus, _RULES[-1][2])
-    if shutdown_hits and not _has_panic_patterns(lower_corpus):
+    if shutdown_hits and not _has_panic_patterns(text_corpus):
         return DetectionResult(
             crash_type=CrashType.CLEAN_SHUTDOWN,
             severity=Severity.INFO,
@@ -258,16 +257,21 @@ def _match_patterns(label: str, corpus: str, patterns: list[str]) -> list[str]:
     return hits
 
 
-def _has_panic_patterns(lower_corpus: str) -> bool:
-    # Must cover every KERNEL_PANIC/MCE pattern from _RULES above - otherwise
-    # a real panic whose corpus also happens to contain a shutdown-target
-    # line (e.g. a watchdog-forced reboot right after a double fault) gets
-    # silently reclassified as CLEAN_SHUTDOWN instead of the actual panic.
-    return any(p in lower_corpus for p in [
-        "kernel panic", "bug:", "general protection fault",
-        "double fault", "triple fault",
-        "machine check exception", "mce:", "mcelog",
-    ])
+# Must cover every KERNEL_PANIC/MCE pattern from _RULES above - otherwise
+# a real panic whose corpus also happens to contain a shutdown-target
+# line (e.g. a watchdog-forced reboot right after a double fault) gets
+# silently reclassified as CLEAN_SHUTDOWN instead of the actual panic.
+# Anchored at a word boundary: as bare substrings, "bug:" matched every
+# "debug:" line and "mce:" every "ecommerce:". The kernel prints BUG: in
+# capitals, so that one is also case-sensitive.
+_PANIC_MARKERS = re.compile(
+    r"\bBUG:|(?i:kernel panic|general protection fault|double fault|triple fault"
+    r"|machine check exception|\bmce:|mcelog)"
+)
+
+
+def _has_panic_patterns(corpus: str) -> bool:
+    return _PANIC_MARKERS.search(corpus) is not None
 
 
 def _enrich_with_hardware(results: list[DetectionResult], telemetry: dict) -> None:

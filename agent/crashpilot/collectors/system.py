@@ -114,9 +114,10 @@ class SystemCollector(BaseCollector):
             return {"error": str(e)}
 
     async def _collect_pcie(self) -> list[str]:
-        """Extract PCIe AER (Advanced Error Reporting) events from dmesg."""
+        """Extract PCIe AER (Advanced Error Reporting) events from the kernel
+        log of the boot being analyzed (the previous one), not every boot."""
         stdout, _, _ = await run_cmd(
-            "journalctl", "-k", "--no-pager", "--lines=1000",
+            "journalctl", "-k", "--boot=-1", "--no-pager", "--lines=1000",
             "--grep=AER|PCIe.*error|Corrected error|Uncorrected.*error",
             timeout=20,
         )

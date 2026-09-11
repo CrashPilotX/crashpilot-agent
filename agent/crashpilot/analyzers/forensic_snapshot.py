@@ -49,7 +49,11 @@ def build_forensic_snapshot(
         gaps.append("previous-boot journal did not contain retained error evidence")
 
     evidence = detection.get("evidence") or []
-    signals = detection.get("signals") or []
+    signals = detection.get("signals") or {}
+    # The detector reports signals as a dict of name -> reading. Fingerprint
+    # the names only, so the same failure groups together when a reading
+    # (a temperature, a disk count) differs.
+    signal_names = sorted(signals) if isinstance(signals, dict) else list(signals)
     sources = sorted({
         str(event.get("source"))
         for event in timeline
@@ -58,7 +62,7 @@ def build_forensic_snapshot(
     fingerprint_payload = {
         "crash_type": detection.get("crash_type"),
         "evidence": evidence[:8],
-        "signals": signals[:8],
+        "signals": signal_names[:8],
     }
     fingerprint = hashlib.sha256(
         json.dumps(fingerprint_payload, sort_keys=True, default=str).encode("utf-8")

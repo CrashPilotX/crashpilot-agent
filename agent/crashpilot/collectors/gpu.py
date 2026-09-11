@@ -95,9 +95,11 @@ class GpuCollector(BaseCollector):
             "nvidia-smi", "--query-gpu=timestamp,name,pstate", "--format=csv", timeout=10
         )
 
-        # XID errors from dmesg (NVIDIA-specific fault codes)
+        # XID errors from dmesg (NVIDIA-specific fault codes), from the boot
+        # being analyzed only: unscoped, an Xid from weeks ago matched in
+        # every later analysis and blamed the GPU for unrelated crashes.
         xid_stdout, _, _ = await run_cmd(
-            "journalctl", "--no-pager", "--lines=500", "--grep=NVRM.*Xid"
+            "journalctl", "--boot=-1", "--no-pager", "--lines=500", "--grep=NVRM.*Xid"
         )
 
         return {
