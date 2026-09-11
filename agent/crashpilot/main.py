@@ -422,8 +422,46 @@ def _credentials_work(url: str, anon_key: str, system_id: str, agent_token: str)
     return resp.status_code == 200
 
 
-def _enroll_and_store(join_token: str, external_id: str, *, persist_token: bool) -> dict:
-    """Enroll with a join token and save the node's credentials. Raises on failure."""
+def _state_file(name: str) -> Path:
+    """A small state file in the data dir: "reenroll-attempt" (the automatic
+    enrollment cooldown), "retired", "identity-check"."""
+    from .config import get_settings
+
+    return Path(get_settings().data_dir or ".") / name
+
+
+def _retired_help(marker: Path) -> str:
+    try:
+        since = marker.read_text(encoding="utf-8").strip().splitlines()[0]
+    except (OSError, IndexError):
+        since = ""
+    return (
+        f"This node was retired from the dashboard{f' ({since})' if since else ''}, so it no "
+        "longer enrolls by itself. Restore it in the dashboard, then run "
+        "`sudo crashpilot enroll` on this machine."
+    )
+
+
+def _mark_retired(marker: Path) -> None:
+    from datetime import datetime, timezone
+
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(datetime.now(timezone.utc).isoformat(timespec="seconds") + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _enroll_and_store(
+    join_token: str, external_id: str, *, persist_token: bool, detected: str = "",
+) -> dict:
+    """Enroll with a join token and save the node's credentials. Raises on failure.
+
+    ``external_id`` is an identity given to this command; ``detected`` one the
+    caller has just detected (a machine copied from another's image).
+    Otherwise the pinned identity is reused, and only a node without one
+    detects it.
+    """
     from . import config as cfg_mod
     from .cloud_push import _agent_version, _hostname
     from .enrollment import (
@@ -436,7 +474,33 @@ def _enroll_and_store(join_token: str, external_id: str, *, persist_token: bool)
 
     cfg = cfg_mod.get_settings()
     token = parse_join_token(join_token)
-    identity = resolve_identity(external_id or cfg.external_id, cfg.node_name)
+    if external_id.strip():
+        identity, source = resolve_identity(external_id), "explicit"
+    elif detected:
+        identity, source = detected, "detected"
+    elif cfg.external_id:
+        # Enrolled before the source was recorded, or set in the environment:
+        # treated as chosen, so it is never replaced by a detected one.
+        identity, source = cfg.external_id, cfg.external_id_source or "explicit"
+    else:
+        identity, source = resolve_identity("", cfg.node_name), "detected"
+    env_path = env_file_for_write(cfg_mod._find_env_file())
+
+    # Saved before trying, so a machine that cannot reach the dashboard yet
+    # (cloud-init before the network is up) still enrolls on a later
+    # heartbeat, and under the identity it was given.
+    early: dict[str, str] = {}
+    # Keep the join token only when it was handed to this command. One that
+    # arrives through the environment (a Kubernetes Secret) stays there
+    # rather than being copied onto the node's disk.
+    if persist_token:
+        early["CRASHPILOT_ENROLL_TOKEN"] = join_token.strip().strip("'\"")
+    if external_id.strip():
+        early.update({"CRASHPILOT_EXTERNAL_ID": identity, "CRASHPILOT_EXTERNAL_ID_SOURCE": source})
+    if early:
+        write_env_values(env_path, early)
+        cfg_mod._settings = None
+
     result = enroll(token, identity, _hostname(), _agent_version())
 
     values = {
@@ -448,18 +512,42 @@ def _enroll_and_store(join_token: str, external_id: str, *, persist_token: bool)
         # exactly the same one: detected afresh, an explicit --external-id is
         # forgotten and a flaky metadata service changes the answer, and
         # either way the node enrolls as a brand-new system. That created
-        # duplicates and walked straight past a retire-by-hand.
+        # duplicates and walked straight past a retire-by-hand. Whether it
+        # was detected decides if a copy of this machine may replace it.
         "CRASHPILOT_EXTERNAL_ID": identity,
+        "CRASHPILOT_EXTERNAL_ID_SOURCE": source,
     }
-    # Keep the join token only when it was handed to this command. One that
-    # arrives through the environment (a Kubernetes Secret) stays there
-    # rather than being copied onto the node's disk.
-    if persist_token:
-        values["CRASHPILOT_ENROLL_TOKEN"] = join_token.strip().strip("'\"")
-    env_path = env_file_for_write(cfg_mod._find_env_file())
     write_env_values(env_path, values)
     cfg_mod._settings = None
+    _state_file("retired").unlink(missing_ok=True)
     return {**result, "identity": identity, "env_path": str(env_path)}
+
+
+def _auto_enroll(join_token: str, *, detected: str = "") -> None:
+    """Enroll from the heartbeat, which never does so for a node retired on
+    purpose, and at most once per cooldown, so a revoked or expired token is
+    not retried every minute. Exits 1 when it cannot."""
+    from .enrollment import REENROLL_COOLDOWN_SECONDS, EnrollmentRetired, reenroll_allowed
+
+    retired = _state_file("retired")
+    if retired.exists():
+        console.print(f"[red]✗ Not enrolling:[/red] {_retired_help(retired)}")
+        raise typer.Exit(1)
+    if not reenroll_allowed(_state_file("reenroll-attempt")):
+        console.print(
+            "[red]✗ Not enrolled:[/red] the last attempt was less than "
+            f"{REENROLL_COOLDOWN_SECONDS // 60} minutes ago; the next attempt is on a later heartbeat."
+        )
+        raise typer.Exit(1)
+    try:
+        _enroll_and_store(join_token, "", persist_token=False, detected=detected)
+    except EnrollmentRetired as e:
+        _mark_retired(retired)
+        console.print(f"[red]✗ Not enrolling:[/red] {_retired_help(retired)}")
+        raise typer.Exit(1) from e
+    except Exception as e:
+        console.print(f"[red]✗ Enrollment failed:[/red] {e}")
+        raise typer.Exit(1) from e
 
 
 @app.command()
@@ -471,7 +559,7 @@ def enroll(
     """[bold]Enroll[/bold] this machine with a join token, for fleets that add machines automatically."""
     from . import config as cfg_mod
     from .cloud_push import push_heartbeat
-    from .enrollment import EnrollmentError
+    from .enrollment import EnrollmentError, EnrollmentRetired, note_enroll_attempt
 
     cfg = cfg_mod.get_settings()
     token_str = join_token or cfg.enroll_token
@@ -488,11 +576,19 @@ def enroll(
         console.print(f"[green]✓[/green] Already enrolled as system [dim]{cfg.supabase_system_id}[/dim]; nothing to do.")
         raise typer.Exit(0)
 
+    # Run by hand, this is never held back by the automatic cooldown (and it
+    # is how a retired node comes back), but it starts one, so a heartbeat
+    # that finds the token saved below does not enroll alongside it.
+    note_enroll_attempt(_state_file("reenroll-attempt"))
     try:
         result = _enroll_and_store(
             token_str, external_id,
             persist_token=bool(join_token) and join_token.strip() != cfg.enroll_token,
         )
+    except EnrollmentRetired as e:
+        _mark_retired(_state_file("retired"))
+        console.print(f"[red]✗ Enrollment failed:[/red] {e}")
+        raise typer.Exit(1) from e
     except EnrollmentError as e:
         console.print(f"[red]✗ Enrollment failed:[/red] {e}")
         raise typer.Exit(1) from e
@@ -534,14 +630,18 @@ def sign_off_command(
     preStop hook. The next heartbeat undoes it, so a reboot needs nothing
     extra. Always exits 0: a failed sign-off must never hold up a shutdown.
     """
-    from .config import get_settings
-    from .enrollment import sign_off
-
-    cfg = get_settings()
-    if not (cfg.supabase_url and cfg.supabase_anon_key and cfg.supabase_system_id and cfg.supabase_token):
-        raise typer.Exit(0)
     try:
+        # Imports and settings inside the try too: a malformed .env must not
+        # turn into a failed ExecStop or preStop hook.
+        from .config import get_settings
+        from .enrollment import sign_off
+
+        cfg = get_settings()
+        if not (cfg.supabase_url and cfg.supabase_anon_key and cfg.supabase_system_id and cfg.supabase_token):
+            raise typer.Exit(0)
         sign_off(cfg.supabase_url, cfg.supabase_anon_key, cfg.supabase_system_id, cfg.supabase_token)
+    except typer.Exit:
+        raise
     except Exception as e:
         console.print(f"[yellow]![/yellow] Could not sign off: {e}")
         raise typer.Exit(0) from None
@@ -555,6 +655,7 @@ def heartbeat(
 ) -> None:
     """[bold]Send[/bold] a heartbeat to the CrashPilot cloud (called by the systemd timer)."""
     import asyncio
+    import os
 
     from .config import get_settings
 
@@ -563,12 +664,32 @@ def heartbeat(
     # A node given only a join token (a Kubernetes Secret, an image with
     # CRASHPILOT_ENROLL_TOKEN baked in) enrolls on its first heartbeat.
     if cfg.enroll_token and not (cfg.supabase_system_id and cfg.supabase_token):
-        try:
-            _enroll_and_store(cfg.enroll_token, "", persist_token=False)
-        except Exception as e:
-            console.print(f"[red]✗ Enrollment failed:[/red] {e}")
-            raise typer.Exit(1) from e
+        _auto_enroll(cfg.enroll_token)
         cfg = get_settings()
+    elif (
+        cfg.enroll_token and cfg.external_id and cfg.external_id_source == "detected"
+        and "CRASHPILOT_EXTERNAL_ID" not in os.environ
+        and not _state_file("retired").exists()
+    ):
+        # A machine made from an image of an enrolled one carries its pinned
+        # identity and credentials, and would report as that machine. Once
+        # per boot, check the detected identity is still this machine's.
+        from .enrollment import copied_identity, current_boot_id
+
+        moved, fresh = copied_identity(
+            cfg.external_id, cfg.node_name, _state_file("identity-check"), current_boot_id(),
+        )
+        if moved:
+            if fresh:
+                # A cooldown recorded before the copy was made is not this
+                # machine's; enroll as itself before its first heartbeat.
+                _state_file("reenroll-attempt").unlink(missing_ok=True)
+            console.print(
+                f"[yellow]![/yellow] This machine is {moved}, not {cfg.external_id} as enrolled "
+                "(copied from its image?); enrolling as itself."
+            )
+            _auto_enroll(cfg.enroll_token, detected=moved)
+            cfg = get_settings()
 
     # Push mode requires url + anon_key + system_id + token. Tell the user exactly
     # what's missing instead of silently doing nothing.
@@ -659,23 +780,22 @@ def heartbeat(
         return flushed
 
     from .cloud_push import CredentialsRejected
-    from .enrollment import reenroll_allowed
 
     try:
         flushed = asyncio.run(_heartbeat_and_backfill())
     except CredentialsRejected as e:
         # A newer enrollment of this same identity, or a restore from the
-        # dashboard, replaced these credentials. A node that has its join token
-        # enrolls again, at most once per cooldown so a node that keeps failing
-        # does not hammer the enrollment endpoint.
-        marker = Path(cfg.data_dir or ".") / "reenroll-attempt"
-        if not (cfg.enroll_token and reenroll_allowed(marker)):
+        # dashboard, replaced these credentials. A node that has its join
+        # token enrolls again, unless it was retired on purpose, and at most
+        # once per cooldown so a node that keeps failing does not hammer the
+        # enrollment endpoint.
+        if not cfg.enroll_token:
             console.print(f"[red]✗ Heartbeat failed:[/red] {e}")
             raise typer.Exit(1) from e
-        console.print("[yellow]![/yellow] Credentials were rejected; enrolling again with the join token.")
+        console.print("[yellow]![/yellow] Credentials were rejected.")
+        _auto_enroll(cfg.enroll_token)
+        cfg = get_settings()
         try:
-            _enroll_and_store(cfg.enroll_token, "", persist_token=False)
-            cfg = get_settings()
             flushed = asyncio.run(_heartbeat_and_backfill())
         except Exception as e2:
             console.print(f"[red]✗ Heartbeat failed after enrolling again:[/red] {e2}")
@@ -685,6 +805,10 @@ def heartbeat(
         # the timer fires. Detailed text comes from cloud_push._explain_http_error.
         console.print(f"[red]✗ Heartbeat failed:[/red] {e}")
         raise typer.Exit(1) from e
+
+    # Credentials that work mean the node is not retired (whatever restored
+    # it, a configure or an enroll by hand).
+    _state_file("retired").unlink(missing_ok=True)
 
     if not quiet:
         console.print(
@@ -775,7 +899,9 @@ def update(
 
     if quiet:
         return
-    if result["updated"]:
+    if result.get("packaged"):
+        console.print(f"[dim]{result['message']}[/dim]")
+    elif result["updated"]:
         console.print("[green]✓ CrashPilotX agent updated successfully.[/green]")
         console.print("[dim]The next heartbeat will use the updated agent code.[/dim]")
     else:
@@ -846,6 +972,10 @@ def doctor() -> None:
     else:
         report("Push mode configured", "fail", "missing: " + ", ".join(missing),
                "Create a system in the dashboard, then run the configure command it shows.")
+    retired = _state_file("retired")
+    if retired.exists():
+        report("Enrollment", "fail", "retired from the dashboard: automatic enrollment is off",
+               _retired_help(retired))
 
     # 4. Live connection to the dashboard (also validates schema/RPCs + token)
     if push_configured:

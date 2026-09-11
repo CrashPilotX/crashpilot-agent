@@ -50,7 +50,13 @@ def get_agent_token() -> str:
                 tf.chmod(0o600)
         except OSError:
             log.warning("Could not tighten permissions on %s", tf)
-        return tf.read_text().strip()
+        existing = tf.read_text().strip()
+        if existing:
+            return existing
+        # Left empty by a write cut short (a full disk): "" would be the token
+        # from then on and every request refused, so make a new one.
+        log.warning("%s was empty; generating a new API token", tf)
+        tf.unlink()
     token = secrets.token_urlsafe(32)
     fd = os.open(tf, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as handle:

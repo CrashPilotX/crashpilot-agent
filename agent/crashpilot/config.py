@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -75,10 +76,8 @@ class Settings(BaseSettings):
     confidence_threshold: float = 0.4
     analysis_timeout: int = 120
 
-    # Agent API authentication token.
-    # Leave empty to auto-generate a token on first run (stored in data_dir/agent.token).
-    # Override with CRASHPILOT_API_TOKEN env var or in .env.
-    api_token: str = ""
+    # The local API's bearer token is generated on first run and kept in
+    # data_dir/agent.token (`crashpilot token` shows it); it is not a setting.
 
     # Cloud push mode: set by `crashpilot configure <connection-string>`.
     # When configured, the agent pushes heartbeats and reports to Supabase
@@ -91,9 +90,13 @@ class Settings(BaseSettings):
     # Self-enrollment. A cpjoin_ join token lets the node enroll itself (and
     # enroll again if its credentials are ever rejected). node_name comes from
     # the Kubernetes downward API; external_id overrides identity detection.
+    # external_id_source records whether the pinned external_id was
+    # "detected" or "explicit": only a detected one is replaced when the
+    # machine turns out to be a copy of the one that enrolled.
     enroll_token: str = ""
     node_name: str = ""
     external_id: str = ""
+    external_id_source: str = ""
 
     # Optional outbound incident notification. Only HTTPS endpoints are used.
     webhook_url: str = ""
@@ -121,6 +124,19 @@ class Settings(BaseSettings):
     # online, but detailed live metrics and status polling can run less often.
     live_metrics_interval_seconds: int = 900
     cloud_status_interval_seconds: int = 1800
+
+    @field_validator("supabase_url")
+    @classmethod
+    def _supabase_url_is_https(cls, value: str) -> str:
+        # Every heartbeat carries the agent token. configure and join tokens
+        # already insist on https://; a URL set in the environment (a
+        # Kubernetes Secret, a docker .env) must not bypass that.
+        if value and not value.lower().startswith("https://"):
+            raise ValueError(
+                "CRASHPILOT_SUPABASE_URL must start with https:// (refusing to send the agent "
+                "token in plaintext). Fix it in the environment or .env."
+            )
+        return value
 
     def model_post_init(self, __context: object) -> None:
         data_dir = self.data_dir or _default_data_dir()

@@ -113,6 +113,27 @@ class TestSettings:
         s2 = get_settings()
         assert s1 is s2
 
+    def test_a_plaintext_supabase_url_is_refused(self, monkeypatch):
+        # configure and join tokens already insist on https://, but a URL from
+        # the environment (a Kubernetes Secret, a docker .env) was used as is,
+        # sending the agent token in plaintext.
+        import crashpilot.config as cfg_mod
+
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "http://abc.supabase.co")
+        cfg_mod._settings = None
+        with pytest.raises(ValueError, match="CRASHPILOT_SUPABASE_URL must start with https://"):
+            cfg_mod.get_settings()
+
+    def test_an_https_or_empty_supabase_url_is_fine(self, monkeypatch):
+        import crashpilot.config as cfg_mod
+
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "https://abc.supabase.co")
+        cfg_mod._settings = None
+        assert cfg_mod.get_settings().supabase_url == "https://abc.supabase.co"
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "")
+        cfg_mod._settings = None
+        assert cfg_mod.get_settings().supabase_url == ""
+
     def test_db_path_is_not_current_directory(self):
         """Regression: Path('') == PosixPath('.') bug: db_path must not be '.'"""
         from crashpilot.config import get_settings

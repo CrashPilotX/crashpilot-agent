@@ -386,3 +386,23 @@ class TestAgentTokenFile:
         os.chmod(path, 0o644)
         server.get_agent_token()
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+    def test_an_empty_token_file_is_replaced(self, tmp_db):
+        # A write cut short by a full disk left an empty file, and "" was the
+        # token from then on: every request was refused.
+        import os
+        import stat
+
+        import crashpilot.config as cfg_mod
+        from crashpilot.api import server
+
+        cfg_mod._settings = None
+        path = server._token_file()
+        path.write_text("\n")
+
+        token = server.get_agent_token()
+
+        assert len(token) >= 32
+        assert path.read_text().strip() == token
+        assert server.get_agent_token() == token
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600

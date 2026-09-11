@@ -95,6 +95,16 @@ def _atomic_write_text(path: Path, text: str) -> None:
     os.replace(tmp_path, path)
 
 
+def _fresh(saved_at: float, max_age_seconds: float) -> bool:
+    """Whether a cache or "sent at" time is less than max_age old.
+
+    A time in the future was written while the clock ran ahead, and counts as
+    stale: after the clock is corrected backwards it would otherwise read as
+    "just now" until the clock caught up, holding back that section or cache.
+    """
+    return 0 <= time.time() - saved_at < max_age_seconds
+
+
 def _headers(anon_key: str) -> dict[str, str]:
     return {
         "apikey": anon_key,
@@ -245,7 +255,7 @@ def _load_cached_speedtest(path: Path | None, max_age_seconds: int) -> dict[str,
         cache = json.loads(path.read_text(encoding="utf-8"))
         saved_at = float(cache.get("saved_at", 0))
         result = cache.get("result")
-        if isinstance(result, dict) and time.time() - saved_at <= max_age_seconds:
+        if isinstance(result, dict) and _fresh(saved_at, max_age_seconds):
             cached = dict(result)
             cached["cached"] = True
             cached["age_seconds"] = round(time.time() - saved_at, 1)
@@ -470,7 +480,7 @@ def _load_live_dmesg_cache(path: Path | None) -> dict[str, Any] | None:
     try:
         cache = json.loads(path.read_text(encoding="utf-8"))
         saved_at = float(cache.get("saved_at", 0))
-        if time.time() - saved_at <= _LIVE_DMESG_TTL_SECONDS:
+        if _fresh(saved_at, _LIVE_DMESG_TTL_SECONDS):
             return cache.get("dmesg")
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return None
@@ -748,7 +758,7 @@ def _collect_hardware_profile() -> dict[str, Any]:
     if cache_path is not None:
         try:
             cache = json.loads(cache_path.read_text(encoding="utf-8"))
-            if time.time() - float(cache.get("saved_at", 0)) <= _HARDWARE_PROFILE_TTL_SECONDS:
+            if _fresh(float(cache.get("saved_at", 0)), _HARDWARE_PROFILE_TTL_SECONDS):
                 cached_profile = cache.get("profile")
                 if isinstance(cached_profile, dict):
                     return cached_profile
@@ -1014,7 +1024,7 @@ def _save_section_ttl(path: Path | None, ttl: dict[str, float]) -> None:
 
 
 def _section_due(sent_at: dict[str, float], section: str, interval_seconds: int) -> bool:
-    return time.time() - sent_at.get(section, 0) >= interval_seconds
+    return not _fresh(sent_at.get(section, 0), interval_seconds)
 
 
 def _mark_section_sent(section: str) -> None:
@@ -1214,7 +1224,7 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
     if not slim:
         # A section that fails is left out and not marked sent, so it is
         # tried again when next due.
-        if now - sent_at.get("hardware_profile", 0) >= _HARDWARE_SECTION_TTL_SECS:
+        if _section_due(sent_at, "hardware_profile", _HARDWARE_SECTION_TTL_SECS):
             hardware = _isolated("hardware_profile", _build_hardware_profile_metrics)
             if hardware is not None:
                 metrics["hardware_profile"] = hardware
@@ -1222,7 +1232,7 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
 
         # dmesg: collect every tick (uses 5-min file cache), include only when due.
         dmesg = _isolated("dmesg", _collect_live_dmesg)
-        if dmesg is not None and now - sent_at.get("dmesg", 0) >= _DMESG_SECTION_TTL_SECS:
+        if dmesg is not None and _section_due(sent_at, "dmesg", _DMESG_SECTION_TTL_SECS):
             metrics["dmesg"] = dmesg
             updates["dmesg"] = now
 
@@ -1232,16 +1242,16 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
             from .flight_recorder import record_snapshot, summarize_window
 
             record_snapshot()
-            if now - sent_at.get("flight_recorder", 0) >= _FLIGHT_RECORDER_SECTION_TTL_SECS:
+            if _section_due(sent_at, "flight_recorder", _FLIGHT_RECORDER_SECTION_TTL_SECS):
                 metrics["flight_recorder"] = summarize_window(hours=6)
                 updates["flight_recorder"] = now
         except Exception as exc:
-            if now - sent_at.get("flight_recorder", 0) >= _FLIGHT_RECORDER_SECTION_TTL_SECS:
+            if _section_due(sent_at, "flight_recorder", _FLIGHT_RECORDER_SECTION_TTL_SECS):
                 metrics["flight_recorder"] = {"error": str(exc)}
                 updates["flight_recorder"] = now
 
         # agent_health: version, timer states, tool availability; include when due.
-        if now - sent_at.get("agent_health", 0) >= _AGENT_HEALTH_SECTION_TTL_SECS:
+        if _section_due(sent_at, "agent_health", _AGENT_HEALTH_SECTION_TTL_SECS):
             health = _isolated("agent_health", lambda: _build_agent_health(dmesg or {}))
             if health is not None:
                 metrics["agent_health"] = health
@@ -1317,6 +1327,8 @@ def _explain_http_error(exc: httpx.HTTPStatusError) -> str:
     Supabase returns useful JSON in the body (code/message/hint) that
     raise_for_status() drops: surface it so the user can self-diagnose.
     """
+    from .config import _find_env_file
+
     resp = exc.response
     body = (resp.text or "").strip()
     status = resp.status_code
@@ -1331,13 +1343,15 @@ def _explain_http_error(exc: httpx.HTTPStatusError) -> str:
     if status in (401, 403):
         return (
             f"HTTP {status}: Supabase rejected the request: check that "
-            f"CRASHPILOT_SUPABASE_ANON_KEY in /etc/crashpilot/.env matches your "
+            f"CRASHPILOT_SUPABASE_ANON_KEY in {_find_env_file()} matches your "
             f"project's anon key.\n  Server said: {body}"
         )
     if status == 400 and ("Invalid system_id or agent_token" in body or "P0001" in body):
         return (
-            f"HTTP {status}: this system_id / agent_token pair is not in the "
-            f"systems table. Re-run `sudo crashpilot configure cpilot_...` with a "
+            f"HTTP {status}: the dashboard does not accept this system_id / agent_token "
+            f"(from {_find_env_file()}). If the system was retired, restore it in the "
+            f"dashboard first. A machine enrolled with a join token then enrolls again "
+            f"by itself; otherwise run `sudo crashpilot configure cpilot_...` with a "
             f"fresh connection string from the dashboard.\n  Server said: {body}"
         )
     return f"HTTP {status} from Supabase.\n  Server said: {body}"
