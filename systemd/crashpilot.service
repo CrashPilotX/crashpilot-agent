@@ -1,6 +1,6 @@
 [Unit]
 Description=CrashPilot — AI Linux Crash Forensics Agent
-Documentation=https://kdigitalsystems.github.io/CrashPilot
+Documentation=https://crashpilotx.com/docs
 # network-online.target (not just network.target) so the boot analysis can
 # actually reach Supabase to push the crash report — network.target is reached
 # before connectivity is up, which would drop the push.
