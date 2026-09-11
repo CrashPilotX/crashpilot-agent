@@ -27,6 +27,8 @@ ProtectHome=read-only
 ProtectSystem=full
 # Allow reading system logs and hardware info
 ReadOnlyPaths=/var /run /sys /proc
+# Files it creates (crash database, journal and dmesg caches) are private.
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

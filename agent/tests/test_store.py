@@ -23,8 +23,10 @@ def tmp_db(tmp_path, monkeypatch):
 
 
 from crashpilot.storage.store import (  # noqa: E402
+    MAX_PUSH_REJECTIONS,
     cleanup_old_reports,
     count_reports,
+    count_set_aside,
     count_unpushed,
     delete_report,
     get_meta,
@@ -33,6 +35,7 @@ from crashpilot.storage.store import (  # noqa: E402
     list_flight_snapshots,
     list_reports,
     list_unpushed,
+    mark_push_rejected,
     mark_pushed,
     save_flight_snapshot,
     save_report,
@@ -78,6 +81,30 @@ class TestInitDb:
         assert "flight_snapshots" in tables
         assert "webhook_deliveries" in tables
         con.close()
+
+    def test_an_older_database_gains_the_new_columns(self, tmp_path, monkeypatch):
+        old = tmp_path / "old.db"
+        con = sqlite3.connect(str(old))
+        con.execute(
+            "CREATE TABLE crash_reports (id TEXT PRIMARY KEY, boot_id TEXT NOT NULL, "
+            "detected_at TEXT NOT NULL, crash_time TEXT, crash_type TEXT NOT NULL, "
+            "severity TEXT NOT NULL DEFAULT 'unknown', summary TEXT, telemetry TEXT NOT NULL, "
+            "analysis TEXT, created_at TEXT NOT NULL DEFAULT '')"
+        )
+        con.execute(
+            "INSERT INTO crash_reports (id, boot_id, detected_at, crash_type, telemetry) "
+            "VALUES ('crash_old', 'b', '2026-01-01T00:00:00Z', 'oom_kill', '{}')"
+        )
+        con.commit()
+        con.close()
+        monkeypatch.setenv("CRASHPILOT_DB_PATH", str(old))
+        import crashpilot.config as cfg_mod
+        cfg_mod._settings = None
+
+        init_db()
+        mark_push_rejected("crash_old")
+
+        assert [r["id"] for r in list_unpushed()] == ["crash_old"]
 
 
 class TestBackfill:
@@ -266,3 +293,59 @@ class TestFlightSnapshots:
     def test_snapshot_requires_timestamp(self):
         with pytest.raises(ValueError, match="captured_at"):
             save_flight_snapshot({"memory": {"used_pct": 42}})
+
+    def test_a_full_window_returns_the_newest_samples_oldest_first(self):
+        # Six hours of one-minute snapshots is 360 rows. Taking the first 240
+        # of them left the heartbeat's "latest" two hours stale. Same shape,
+        # scaled down: 36 ten-minute samples, 24 wanted.
+        now = datetime.now(timezone.utc)
+        for tens_ago in range(35, -1, -1):
+            save_flight_snapshot({
+                "captured_at": (now - timedelta(minutes=10 * tens_ago, seconds=5)).isoformat(),
+                "n": tens_ago,
+            })
+
+        snapshots = list_flight_snapshots(hours=6, limit=24)
+
+        assert len(snapshots) == 24
+        assert [s["n"] for s in snapshots] == list(range(23, -1, -1))
+
+    def test_snapshots_from_a_clock_that_ran_ahead_are_not_the_latest(self):
+        now = datetime.now(timezone.utc)
+        save_flight_snapshot({"captured_at": (now + timedelta(hours=3)).isoformat(), "n": "future"})
+        save_flight_snapshot({"captured_at": (now - timedelta(minutes=1)).isoformat(), "n": "now"})
+
+        assert [s["n"] for s in list_flight_snapshots(hours=1)] == ["now"]
+
+
+class TestRejectedReports:
+    def test_a_report_rejected_repeatedly_is_set_aside(self):
+        save_report(_make_report("crash_bad", detected_at="2026-01-01T00:00:00+00:00"))
+        for _ in range(MAX_PUSH_REJECTIONS - 1):
+            mark_push_rejected("crash_bad")
+        assert [r["id"] for r in list_unpushed()] == ["crash_bad"]
+
+        mark_push_rejected("crash_bad")
+
+        assert list_unpushed() == []
+        assert count_unpushed() == 0
+        assert count_set_aside() == 1
+        # Still stored locally.
+        assert get_report("crash_bad") is not None
+
+    def test_set_aside_reports_no_longer_hold_up_newer_ones(self):
+        save_report(_make_report("crash_bad", detected_at="2026-01-01T00:00:00+00:00"))
+        save_report(_make_report("crash_new", detected_at="2026-01-02T00:00:00+00:00"))
+        assert [r["id"] for r in list_unpushed(limit=1)] == ["crash_bad"]
+
+        for _ in range(MAX_PUSH_REJECTIONS):
+            mark_push_rejected("crash_bad")
+
+        assert [r["id"] for r in list_unpushed(limit=1)] == ["crash_new"]
+
+    def test_analyzing_again_gives_a_report_a_fresh_start(self):
+        save_report(_make_report("crash_bad"))
+        for _ in range(MAX_PUSH_REJECTIONS):
+            mark_push_rejected("crash_bad")
+        save_report(_make_report("crash_bad"))  # analyze --force
+        assert count_unpushed() == 1

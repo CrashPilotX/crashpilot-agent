@@ -30,6 +30,8 @@ from typing import Any
 
 import httpx
 
+from .config import require_https
+
 log = logging.getLogger(__name__)
 
 JOIN_PREFIX = "cpjoin_"
@@ -39,17 +41,28 @@ _SIGN_OFF_TIMEOUT = httpx.Timeout(4.0)
 # the address is unroutable, so keep the wait short enough that a bare-metal
 # machine does not stall its first boot.
 _METADATA_TIMEOUT = httpx.Timeout(1.0, connect=0.5)
-# A re-enrollment after rejected credentials is attempted at most this often,
-# so a node that keeps failing does not hammer the enrollment endpoint.
+# An automatic enrollment (first, or after rejected credentials) is attempted
+# at most this often, so a node that keeps failing does not hammer the
+# enrollment endpoint.
 REENROLL_COOLDOWN_SECONDS = 600
+# Retries within one enrollment never pause for less than this.
+_MIN_RETRY_PAUSE = 1.0
 
 
 class EnrollmentError(RuntimeError):
     """Enrollment failed in a way retrying will not fix."""
 
 
+class EnrollmentRetired(EnrollmentError):
+    """The dashboard retired this node on purpose; it must not enroll by itself."""
+
+
 class EnrollmentRateLimited(RuntimeError):
     """The token saw too many enrollments in the last minute; retry shortly."""
+
+
+class EnrollmentUnavailable(RuntimeError):
+    """The dashboard answered with a server error; retry shortly."""
 
 
 @dataclass(frozen=True)
@@ -125,11 +138,14 @@ def _azure_vm_id(client: httpx.Client) -> str | None:
     return None
 
 
+def _cloud_probes() -> dict[str, Any]:
+    return {"aws": _aws_instance_id, "gcp": _gcp_instance_id, "azure": _azure_vm_id}
+
+
 def _cloud_instance_id() -> str | None:
-    probes = (("aws", _aws_instance_id), ("gcp", _gcp_instance_id), ("azure", _azure_vm_id))
     try:
         with httpx.Client(timeout=_METADATA_TIMEOUT, follow_redirects=False) as client:
-            for provider, probe in probes:
+            for provider, probe in _cloud_probes().items():
                 try:
                     found = probe(client)
                 except httpx.HTTPError:
@@ -172,6 +188,88 @@ def resolve_identity(explicit: str = "", node_name: str = "") -> str:
     return f"host:{socket.gethostname()}"[:255]
 
 
+def _identity_now(pinned: str, node_name: str) -> str | None:
+    """What the source a pinned identity came from says today.
+
+    Only that one source is asked, and None means it could not answer: a
+    metadata service that timed out, or falling through to a lower source,
+    is not evidence of a different machine (that was the flakiness pinning
+    exists to avoid). Hostnames are never compared; renames are legitimate.
+    """
+    source, _, _ = pinned.partition(":")
+    if source == "k8s":
+        return f"k8s:{node_name.strip()}"[:255] if node_name.strip() else None
+    if source == "machine":
+        machine = _machine_id()
+        return f"machine:{machine}" if machine else None
+    probe = _cloud_probes().get(source)
+    if probe is None:
+        return None
+    try:
+        with httpx.Client(timeout=_METADATA_TIMEOUT, follow_redirects=False) as client:
+            found = probe(client)
+    except httpx.HTTPError:
+        return None
+    return f"{source}:{found}" if found else None
+
+
+def identity_moved(pinned: str, node_name: str) -> str | None:
+    """This machine's own identity, when the source the detected ``pinned``
+    one came from now names a different machine; None when it names the
+    same one or cannot answer."""
+    current = _identity_now(pinned, node_name)
+    return current if current is not None and current != pinned else None
+
+
+def copied_identity(
+    pinned: str, node_name: str, state: Path, boot_id: str | None, now: float | None = None,
+) -> tuple[str | None, bool]:
+    """The identity to enroll under when this is not the machine that enrolled.
+
+    A machine image made after enrolling (an installer run in a Packer build,
+    or the build machine's own heartbeat) carries that machine's pinned
+    identity and credentials, so every copy reported as the build machine.
+    Worked out once per boot and remembered in ``state`` (keyed on the boot
+    and the pinned identity), so metadata probes do not run every minute; a
+    source that did not answer is asked again after the enrollment cooldown,
+    not left unchecked until the next reboot.
+    Returns (identity or None, whether it was worked out afresh).
+    """
+    if not boot_id:
+        return None, False
+    now = time.time() if now is None else now
+    try:
+        cached = json.loads(state.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cached = None
+    if isinstance(cached, dict) and cached.get("boot_id") == boot_id and cached.get("pinned") == pinned:
+        age = now - float(cached.get("checked_at") or 0)
+        if cached.get("answered", True) or 0 <= age < REENROLL_COOLDOWN_SECONDS:
+            return cached.get("moved") or None, False
+
+    current = _identity_now(pinned, node_name)
+    # Enroll under the answer just given: detecting afresh could miss the
+    # metadata service this time and fall through to a machine ID that every
+    # copy of the image shares.
+    moved = current if current is not None and current != pinned else None
+    try:
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({
+            "boot_id": boot_id, "pinned": pinned, "moved": moved,
+            "answered": current is not None, "checked_at": now,
+        }), encoding="utf-8")
+    except OSError:
+        log.debug("Could not record the identity check at %s", state)
+    return moved, True
+
+
+def current_boot_id(path: Path = Path("/proc/sys/kernel/random/boot_id")) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 # ── RPC calls ─────────────────────────────────────────────────────────────────
 
 def _headers(anon_key: str) -> dict[str, str]:
@@ -190,6 +288,16 @@ def _server_message(resp: httpx.Response) -> str:
     if isinstance(body, dict):
         return str(body.get("message") or body.get("hint") or body)
     return str(body)
+
+
+def _retired_on_purpose(resp: httpx.Response) -> bool:
+    # agent_enroll raises with HINT 'retired_manually' for a node someone
+    # retired by hand, as opposed to one retired for going quiet.
+    try:
+        body = resp.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("hint") == "retired_manually"
 
 
 def enroll_once(token: JoinToken, external_id: str, hostname: str | None, version: str) -> dict[str, Any]:
@@ -212,6 +320,8 @@ def enroll_once(token: JoinToken, external_id: str, hostname: str | None, versio
         return data
 
     message = _server_message(resp)
+    if resp.status_code >= 500 or resp.status_code in (408, 429):
+        raise EnrollmentUnavailable(f"HTTP {resp.status_code} from agent_enroll: {message}"[:300])
     if resp.status_code == 404 or "Could not find the function" in message or "PGRST202" in resp.text:
         raise EnrollmentError(
             "This Supabase project does not support join tokens yet. Run supabase/schema.sql "
@@ -219,6 +329,11 @@ def enroll_once(token: JoinToken, external_id: str, hostname: str | None, versio
         )
     if resp.status_code in (401, 403):
         raise EnrollmentError(f"Supabase rejected the join token's anon key (HTTP {resp.status_code}).")
+    if _retired_on_purpose(resp):
+        raise EnrollmentRetired(
+            "This node was retired from the dashboard, so it will not enroll again by itself. "
+            "Restore it in the dashboard, then run `sudo crashpilot enroll` on this machine."
+        )
     if "Too many enrollments" in message:
         raise EnrollmentRateLimited(message)
     if "Invalid enrollment token" in message:
@@ -237,28 +352,39 @@ def enroll(
     *,
     max_wait_seconds: float = 300.0,
     sleep: Any = time.sleep,
+    clock: Any = time.monotonic,
 ) -> dict[str, Any]:
-    """Enroll, retrying with jittered backoff while the token is rate-limited.
+    """Enroll, retrying with jittered backoff while the token is rate-limited
+    or the dashboard cannot be reached.
 
     A large scale-out can exceed the per-token limit of 60 enrollments a
-    minute; backing off lets every node through within a few minutes.
+    minute, and a machine enrolling from cloud-init may not have its network
+    yet; backing off lets both through within a few minutes.
     """
+    deadline = clock() + max_wait_seconds
     delay = 2.0
-    waited = 0.0
     while True:
         try:
             return enroll_once(token, external_id, hostname, version)
-        except EnrollmentRateLimited:
-            if waited >= max_wait_seconds:
+        except (EnrollmentRateLimited, EnrollmentUnavailable, httpx.TransportError) as exc:
+            remaining = deadline - clock()
+            if remaining < _MIN_RETRY_PAUSE:
+                if isinstance(exc, EnrollmentRateLimited):
+                    reason = "the join token stayed rate-limited"
+                else:
+                    reason = f"could not reach the dashboard ({exc})"
                 raise EnrollmentError(
-                    "Gave up after the join token stayed rate-limited for five minutes."
-                ) from None
+                    f"Gave up after {max_wait_seconds / 60:.0f} minute(s): {reason}."
+                ) from exc
             # Jitter from os.urandom keeps a fleet that booted together from
-            # retrying in lockstep, without pulling in the random module.
-            pause = min(delay, max_wait_seconds - waited) * (0.5 + int.from_bytes(os.urandom(1), "big") / 510)
-            log.info("Join token is rate-limited; retrying enrollment in %.0f s", pause)
+            # retrying in lockstep, without pulling in the random module. The
+            # pause fits the time left but never drops below a second: cut
+            # down without a floor, the end of the budget became a burst of
+            # back-to-back requests.
+            pause = delay * (0.5 + int.from_bytes(os.urandom(1), "big") / 510)
+            pause = max(_MIN_RETRY_PAUSE, min(pause, remaining))
+            log.info("Enrollment failed (%s); retrying in %.0f s", exc, pause)
             sleep(pause)
-            waited += pause
             delay = min(delay * 2, 60.0)
 
 
@@ -269,7 +395,7 @@ def sign_off(url: str, anon_key: str, system_id: str, agent_token: str) -> None:
     agent cannot tell a reboot from a power-off or a pod rollout from a drain.
     """
     resp = httpx.post(
-        f"{url.rstrip('/')}/rest/v1/rpc/agent_sign_off",
+        f"{require_https(url).rstrip('/')}/rest/v1/rpc/agent_sign_off",
         headers=_headers(anon_key),
         json={"p_system_id": system_id, "p_agent_token": agent_token},
         timeout=_SIGN_OFF_TIMEOUT,
@@ -296,6 +422,22 @@ def env_file_for_write(found: Path) -> Path:
     return found
 
 
+def _env_literal(value: str) -> str:
+    """A value as python-dotenv (what pydantic-settings reads .env with) will
+    read it back exactly.
+
+    Unquoted, it drops everything from " #" on, strips surrounding blanks and
+    quotes, and expands ${NAME}. Single quotes keep blanks and "#"; inside
+    them only \\ and \\' are escapes. ${...} is expanded even in quotes and
+    has no escape, so each "${" is written as "${:-$}{": the empty variable
+    name can never be set, so it always falls back to a literal "$".
+    """
+    if not value or re.fullmatch(r"[^\s#$'\"]*", value):
+        return value
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'").replace("${", "${:-$}{")
+    return f"'{escaped}'"
+
+
 def write_env_values(env_path: Path, values: dict[str, str]) -> None:
     """Set KEY=value lines in a .env file, privately and atomically.
 
@@ -308,7 +450,7 @@ def write_env_values(env_path: Path, values: dict[str, str]) -> None:
         if "\n" in value or "\r" in value:
             raise ValueError(f"{key} must be a single line")
         pattern = re.compile(rf"^{re.escape(key)}=.*$", re.MULTILINE)
-        line = f"{key}={value}"
+        line = f"{key}={_env_literal(value)}"
         if pattern.search(existing):
             # Escaped for re.sub so backslashes in the value stay literal.
             existing = pattern.sub(line.replace("\\", "\\\\"), existing)
@@ -332,18 +474,25 @@ def write_env_values(env_path: Path, values: dict[str, str]) -> None:
         raise
 
 
+def note_enroll_attempt(marker: Path, now: float | None = None) -> None:
+    """Record an enrollment attempt, starting the cooldown."""
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(time.time() if now is None else now), encoding="utf-8")
+    except OSError:
+        log.debug("Could not record the enrollment attempt at %s", marker)
+
+
 def reenroll_allowed(marker: Path, now: float | None = None) -> bool:
-    """Whether a re-enrollment may be attempted now, recording the attempt."""
+    """Whether an automatic enrollment may be attempted now, recording the attempt."""
     now = time.time() if now is None else now
     try:
         last = float(marker.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         last = 0.0
-    if now - last < REENROLL_COOLDOWN_SECONDS:
+    # An attempt "in the future" was recorded while the clock ran ahead; once
+    # the clock is corrected it must not hold enrollment off until then.
+    if 0 <= now - last < REENROLL_COOLDOWN_SECONDS:
         return False
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(now), encoding="utf-8")
-    except OSError:
-        log.debug("Could not record the re-enrollment attempt at %s", marker)
+    note_enroll_attempt(marker, now)
     return True

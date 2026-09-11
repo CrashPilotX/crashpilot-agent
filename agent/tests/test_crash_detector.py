@@ -150,6 +150,29 @@ class TestCleanShutdown:
         result = detect_crash_type(tel)
         assert result.crash_type == CrashType.MCE
 
+    def test_debug_lines_do_not_turn_a_clean_shutdown_into_a_crash(self):
+        # "bug:" matched inside "debug:", so any service logging at debug level
+        # made every clean shutdown an unknown crash.
+        tel = _tel(
+            journal_errors=(
+                "myapp[812]: debug: flushing cache\n"
+                "shop[90]: ecommerce: order queue drained\n"
+                "systemd-shutdown: Shutting down"
+            )
+        )
+        result = detect_crash_type(tel)
+        assert result.crash_type == CrashType.CLEAN_SHUTDOWN
+
+    def test_kernel_bug_still_overrides_clean_shutdown(self):
+        tel = _tel(
+            journal_errors=(
+                "kernel: BUG: unable to handle page fault for address: 0000000000001000\n"
+                "systemd-shutdown: Shutting down"
+            )
+        )
+        result = detect_crash_type(tel)
+        assert result.crash_type == CrashType.KERNEL_PANIC
+
 
 class TestUnknownAndPowerLoss:
     def test_unknown_when_no_match(self):

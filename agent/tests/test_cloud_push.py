@@ -7,6 +7,7 @@ asyncio_mode = "auto" is set in pyproject.toml so no @pytest.mark.asyncio needed
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 import httpx
@@ -79,6 +80,39 @@ class TestPushHeartbeat:
             assert "cpu" in payload["p_metrics"]
             assert "memory" in payload["p_metrics"]
             assert "disk" in payload["p_metrics"]
+
+    async def test_heartbeat_sections_are_redacted(self, monkeypatch, tmp_path):
+        # The flight-recorder section carries full process command lines; only
+        # crash reports were redacted, so a password passed as an argument
+        # went to the dashboard with every hourly summary.
+        monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: tmp_path / "section_ttl.json")
+        monkeypatch.setattr(cloud_push, "_read_meminfo", lambda: {})
+        monkeypatch.setattr(cloud_push, "_collect_disk_usage", lambda: {})
+        monkeypatch.setattr(cloud_push, "_collect_network_usage", lambda: {})
+        monkeypatch.setattr(cloud_push.shutil, "which", lambda name: None)
+        monkeypatch.setattr(cloud_push, "_collect_hardware_profile", lambda: {})
+        monkeypatch.setattr(cloud_push, "_collect_live_dmesg", lambda: {
+            "tail": "kernel: audit: cmdline token=abcdef123456", "critical_events": [],
+        })
+        monkeypatch.setattr(cloud_push, "_build_agent_health", lambda dmesg: {})
+        monkeypatch.setattr("crashpilot.flight_recorder.record_snapshot", lambda: None)
+        row = {"pid": 7, "name": "migrate", "command": "migrate --db-password=hunter2hunter2"}
+        monkeypatch.setattr(
+            "crashpilot.flight_recorder.summarize_window",
+            lambda hours: {"latest": {"processes": {"memory": [row]}}, "process_memory_growth": [row]},
+        )
+
+        with respx.mock:
+            route = respx.post(HB_URL).mock(return_value=httpx.Response(200))
+            mock_legacy_status()
+            await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
+
+        body = route.calls[0].request.content.decode()
+        assert "migrate --db-password=[REDACTED" in body
+        assert "hunter2hunter2" not in body
+        assert "abcdef123456" not in body
+        # The credentials the RPC needs are not heartbeat metrics.
+        assert json.loads(body)["p_agent_token"] == AGENT_TOKEN
 
     async def test_accepts_explicit_metrics(self):
         """Heartbeat can send caller-supplied live metrics."""
@@ -264,6 +298,36 @@ class TestPushHeartbeat:
             assert "401" in msg
             assert "Invalid token" in msg  # server body is surfaced
 
+    async def test_rejected_credentials_guidance_fits_this_machine(self, monkeypatch, tmp_path):
+        # It named /etc/crashpilot/.env whatever the install used, and only
+        # suggested configure: not a retired system, not self-enrollment.
+        env = tmp_path / "custom-config" / ".env"
+        env.parent.mkdir()
+        env.write_text("")
+        monkeypatch.setenv("CRASHPILOT_CONFIG_DIR", str(env.parent))
+        with respx.mock:
+            respx.post(HB_URL).mock(return_value=httpx.Response(
+                400, json={"code": "P0001", "message": "Invalid system_id or agent_token"},
+            ))
+            with pytest.raises(cloud_push.CredentialsRejected) as caught:
+                await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
+        message = str(caught.value)
+        assert str(env) in message
+        assert "/etc/crashpilot/.env" not in message
+        assert "restore" in message.lower() and "retired" in message
+        # A node retired on purpose does not re-enroll by itself (see
+        # TestRetiredNode); other join-token nodes do.
+        assert "then run `sudo crashpilot enroll`" in message
+        assert "join token" in message and "enrolls again by itself" in message
+
+    async def test_rejected_anon_key_names_the_env_file_in_use(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CRASHPILOT_CONFIG_DIR", str(tmp_path))
+        (tmp_path / ".env").write_text("")
+        with respx.mock:
+            respx.post(HB_URL).mock(return_value=httpx.Response(401, json={"message": "Invalid API key"}))
+            with pytest.raises(RuntimeError, match=str(tmp_path / ".env")):
+                await push_heartbeat(SUPABASE_URL, ANON_KEY, SYSTEM_ID, AGENT_TOKEN)
+
     async def test_missing_rpc_error_mentions_schema(self):
         """A 404 / missing-function error should tell the user to run schema.sql."""
         with respx.mock:
@@ -400,6 +464,97 @@ class TestPushHeartbeat:
         assert "filesystems" not in metrics["disk"]
         assert "speedtest" not in metrics["network"]
         assert metrics["network"]["rx_mbps"] == 1.2
+
+    def test_times_recorded_in_the_future_count_as_stale(self, monkeypatch, tmp_path):
+        # Written while the clock ran ahead. Once it is corrected backwards,
+        # "sent in the future" used to mean "sent recently" until the clock
+        # caught up: no hardware profile, dmesg or health for that long.
+        now = cloud_push.time.time()
+        later = now + 7 * 86400
+        assert cloud_push._section_due({"dmesg": later}, "dmesg", 1800)
+        assert not cloud_push._section_due({"dmesg": now - 60}, "dmesg", 1800)
+
+        dmesg_cache = tmp_path / "live_dmesg.json"
+        dmesg_cache.write_text(json.dumps({"saved_at": later, "dmesg": {"tail": "old"}}))
+        assert cloud_push._load_live_dmesg_cache(dmesg_cache) is None
+
+        speed_cache = tmp_path / "speedtest.json"
+        speed_cache.write_text(json.dumps({"saved_at": later, "result": {"download_mbps": 1}}))
+        assert cloud_push._load_cached_speedtest(speed_cache, 3600) is None
+
+        profile_cache = tmp_path / "hardware_profile.json"
+        profile_cache.write_text(json.dumps({"saved_at": later, "profile": {"cpu": {"model": "old"}}}))
+        monkeypatch.setattr(cloud_push, "_hardware_profile_cache_path", lambda: profile_cache)
+        monkeypatch.setattr(cloud_push, "_collect_cpu_hardware", lambda: {"model": "new"})
+        monkeypatch.setattr(cloud_push, "_collect_memory_hardware", lambda: {})
+        monkeypatch.setattr(cloud_push, "_collect_block_devices", lambda: [])
+        assert cloud_push._collect_hardware_profile()["cpu"] == {"model": "new"}
+
+        ttl_path = tmp_path / "section_ttl.json"
+        ttl_path.write_text(json.dumps({
+            "hardware_profile": later, "dmesg": later, "flight_recorder": later, "agent_health": later,
+        }))
+        monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: ttl_path)
+        monkeypatch.setattr(cloud_push, "_read_meminfo", lambda: {})
+        monkeypatch.setattr(cloud_push, "_collect_disk_usage", lambda: {})
+        monkeypatch.setattr(cloud_push, "_collect_network_usage", lambda: {})
+        monkeypatch.setattr(cloud_push.shutil, "which", lambda name: None)
+        monkeypatch.setattr(cloud_push, "_collect_live_dmesg", lambda: {"tail": ""})
+        monkeypatch.setattr(cloud_push, "_build_agent_health", lambda dmesg: {"version": "t"})
+        monkeypatch.setattr("crashpilot.flight_recorder.record_snapshot", lambda: None)
+        monkeypatch.setattr("crashpilot.flight_recorder.summarize_window", lambda hours: {"n": 1})
+
+        metrics = cloud_push._build_live_metrics()
+
+        assert {"hardware_profile", "dmesg", "flight_recorder", "agent_health"} <= set(metrics)
+
+    def test_tool_output_that_is_not_utf8_is_decoded_not_fatal(self, monkeypatch, tmp_path):
+        # Firmware strings in dmidecode output (or a mount point in df) are not
+        # always UTF-8. A strict decode raised, and the heartbeat failed every
+        # minute until the node showed offline.
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for tool in ("dmidecode", "lsblk", "df"):
+            script = bin_dir / tool
+            script.write_bytes(
+                b"#!/bin/sh\nprintf 'Memory Device\\n\\tSize: 8 GB\\n\\tManufacturer: \\377\\376ACME\\n'\n"
+            )
+            script.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+        memory = cloud_push._collect_memory_hardware()
+
+        assert memory["available"] is True
+        assert "ACME" in memory["modules"][0]["manufacturer"]
+        assert cloud_push._collect_block_devices() == []
+        assert cloud_push._collect_disk_usage()["primary"]["mountpoint"] == "/"
+
+    def test_one_failing_section_is_left_out_not_fatal(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cloud_push, "_section_ttl_path", lambda: tmp_path / "section_ttl.json")
+        monkeypatch.setattr(cloud_push.os, "getloadavg", lambda: (0.5, 0.4, 0.3), raising=False)
+        monkeypatch.setattr(cloud_push, "_read_meminfo", lambda: {"MemTotal": 1024, "MemAvailable": 512})
+        monkeypatch.setattr(cloud_push.shutil, "which", lambda name: None)
+        monkeypatch.setattr(cloud_push, "_collect_network_usage", lambda: {"rx_mbps": 1.0})
+        monkeypatch.setattr(cloud_push, "_collect_live_dmesg", lambda: {"tail": ""})
+        monkeypatch.setattr(cloud_push, "_build_agent_health", lambda dmesg: {"version": "t"})
+        monkeypatch.setattr("crashpilot.flight_recorder.record_snapshot", lambda: None)
+        monkeypatch.setattr("crashpilot.flight_recorder.summarize_window", lambda hours: {})
+
+        def _boom():
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+        monkeypatch.setattr(cloud_push, "_collect_disk_usage", _boom)
+        monkeypatch.setattr(cloud_push, "_collect_hardware_profile", _boom)
+
+        metrics = cloud_push._build_live_metrics()
+
+        assert "disk" not in metrics and "hardware_profile" not in metrics
+        assert metrics["cpu"]["load_1m"] == 0.5
+        assert metrics["memory"]["used_pct"] == 50.0
+        assert metrics["network"] == {"rx_mbps": 1.0}
+        assert metrics["agent_health"] == {"version": "t"}
+        # Retried on its next due tick rather than marked as sent.
+        assert "hardware_profile" not in json.loads((tmp_path / "section_ttl.json").read_text())
 
     def test_agent_health_payload_reports_timer_tools_and_config(self, monkeypatch):
         """Heartbeat metrics include agent health diagnostics for the dashboard."""

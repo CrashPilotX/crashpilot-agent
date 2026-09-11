@@ -175,6 +175,18 @@ def install_latest(
     checksum_url: str = CHECKSUM_URL,
 ) -> dict[str, Any]:
     """Install the latest verified public bundle into the current virtualenv."""
+    # The .deb ships a PyInstaller binary: there is no virtualenv, and
+    # sys.executable is crashpilot itself, so `-m pip` can only fail, after
+    # downloading the bundle, on every hourly run.
+    if getattr(sys, "frozen", False):
+        return {
+            "updated": False,
+            "packaged": True,
+            "message": (
+                "This is a packaged install: it updates through the package manager "
+                "(apt), not `crashpilot update`."
+            ),
+        }
     settings = get_settings()
     data_dir = settings.data_dir
     if data_dir is None:

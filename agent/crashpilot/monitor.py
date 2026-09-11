@@ -15,7 +15,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .analyzers.ai_analyzer import analyze_crash
@@ -47,8 +50,20 @@ log = logging.getLogger(__name__)
 
 
 def _make_report_id(boot_id: str) -> str:
-    h = hashlib.sha256(boot_id.encode()).hexdigest()[:12]
+    # Report IDs are unique across every machine in the cloud, and "unknown"
+    # is what every machine without a boot ID has, so never hash it.
+    seed = uuid.uuid4().hex if boot_id == "unknown" else boot_id
+    h = hashlib.sha256(seed.encode()).hexdigest()[:12]
     return f"crash_{h}"
+
+
+def _kernel_boot_id(path: Path = Path("/proc/sys/kernel/random/boot_id")) -> str | None:
+    """This boot's ID from the kernel, in journalctl's form (no dashes)."""
+    try:
+        value = path.read_text(encoding="utf-8").strip().replace("-", "").lower()
+    except OSError:
+        return None
+    return value if re.fullmatch(r"[0-9a-f]{32}", value) else None
 
 
 async def collect_telemetry() -> dict[str, Any]:
@@ -312,9 +327,18 @@ def _extract_boot_context(
     boots = journal.get("boots", [])
 
     # boots is oldest-first (journalctl convention: index 0 / current boot is
-    # the last entry), so current/previous are the last two entries.
-    current = journal.get("current_boot_id") or (boots[-1]["boot_id"] if boots else "unknown")
+    # the last entry), so current/previous are the last two entries. Without
+    # the journal (collector failed, or no journalctl) the kernel still knows
+    # the current boot.
+    current = (
+        journal.get("current_boot_id")
+        or (boots[-1]["boot_id"] if boots else None)
+        or _kernel_boot_id()
+        or "unknown"
+    )
     previous = journal.get("previous_boot_id") or (boots[-2]["boot_id"] if len(boots) > 1 else None)
-    crash_time = boots[-2].get("last_entry") if len(boots) > 1 else None
+    # An unknown time is None, not "": an empty string sorts before every
+    # date, so retention would prune the report on its first pass.
+    crash_time = (boots[-2].get("last_entry") or None) if len(boots) > 1 else None
 
     return current, previous, crash_time

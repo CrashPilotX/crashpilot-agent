@@ -3,10 +3,28 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 from .base import BaseCollector, run_cmd
+
+# systemd before 254 (Ubuntu 22.04 has 249) ignores --output=json for
+# --list-boots and prints a table: "-1 <boot id> Mon 2026-08-17 22:05:00 UTC—...".
+_TEXT_BOOT_ROW = re.compile(r"^\s*(-?\d+)\s+([0-9a-f]{32})\s+(.*)$")
+_TEXT_UTC_TIME = re.compile(r"(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) UTC")
+
+
+def _text_boot_entry(row: re.Match[str]) -> dict[str, Any]:
+    # Only UTC times are trusted (--utc asks for them); anything else is left
+    # blank rather than guessed from a local zone abbreviation.
+    times = [f"{day}T{clock}Z" for day, clock in _TEXT_UTC_TIME.findall(row.group(3))]
+    return {
+        "index": int(row.group(1)),
+        "boot_id": row.group(2),
+        "first_entry": times[0] if len(times) == 2 else "",
+        "last_entry": times[1] if len(times) == 2 else "",
+    }
 
 
 def _boot_timestamp_to_iso(value: Any) -> str:
@@ -66,23 +84,34 @@ class JournalCollector(BaseCollector):
 
     async def _list_boots(self) -> list[dict]:
         stdout, _, rc = await run_cmd(
-            "journalctl", "--list-boots", "--output=json", "--no-pager"
+            "journalctl", "--list-boots", "--output=json", "--utc", "--no-pager"
         )
         if rc != 0 or not stdout.strip():
             return []
-        boots = []
+        # systemd 254+ prints the whole list as one JSON array on a single
+        # line; accept that, one object per line, and the older text table,
+        # and skip anything else rather than losing the whole collector to
+        # one unexpected value.
+        entries: list[Any] = []
         for line in stdout.strip().splitlines():
             try:
-                entry = json.loads(line)
-                boots.append({
-                    "index": entry.get("index", 0),
-                    "boot_id": entry.get("boot_id", ""),
-                    "first_entry": _boot_timestamp_to_iso(entry.get("first_entry", "")),
-                    "last_entry": _boot_timestamp_to_iso(entry.get("last_entry", "")),
-                })
+                parsed = json.loads(line)
             except json.JSONDecodeError:
+                row = _TEXT_BOOT_ROW.match(line)
+                if row:
+                    entries.append(_text_boot_entry(row))
                 continue
-        return boots
+            entries.extend(parsed if isinstance(parsed, list) else [parsed])
+        return [
+            {
+                "index": entry.get("index", 0),
+                "boot_id": entry.get("boot_id", ""),
+                "first_entry": _boot_timestamp_to_iso(entry.get("first_entry", "")),
+                "last_entry": _boot_timestamp_to_iso(entry.get("last_entry", "")),
+            }
+            for entry in entries
+            if isinstance(entry, dict)
+        ]
 
     async def _get_boot_logs(
         self, boot_id: str, lines: int, priority: str | None = None

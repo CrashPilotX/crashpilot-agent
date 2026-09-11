@@ -6,6 +6,10 @@ if [ -f /etc/crashpilot/.env ]; then
     chmod 600 /etc/crashpilot/.env || true
 fi
 
+# The services' data dir (the units set CRASHPILOT_DATA_DIR to it): the crash
+# database, journal and dmesg caches, the local API token. Private.
+install -d -m 0700 /var/lib/crashpilot
+
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
     # Boot-time crash analysis (runs once per boot)
@@ -15,6 +19,9 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl enable --now crashpilot-heartbeat.timer >/dev/null 2>&1 || true
     systemctl enable --now crashpilot-snapshot.timer >/dev/null 2>&1 || true
     systemctl enable --now crashpilot-update.timer >/dev/null 2>&1 || true
+    # Signs off on a clean shutdown; it must be started now for its ExecStop
+    # to run then. A no-op until push mode is configured.
+    systemctl enable --now crashpilot-signoff.service >/dev/null 2>&1 || true
 fi
 
 echo ""

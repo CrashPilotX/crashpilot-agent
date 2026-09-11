@@ -13,4 +13,10 @@ Copy the variables produced by the CrashPilotX dashboard into `docker/.env`.
 Host-level crash evidence requires the privileged mounts in the Compose file.
 Remove them only when intentionally monitoring the container itself.
 
+Enrolled credentials are kept on the `crashpilot-data` volume
+(`CRASHPILOT_CONFIG_DIR`), so recreating the container keeps the same system.
+The image carries no machine ID of its own; the Compose file mounts the host's
+`/etc/machine-id`, so each host enrolls as itself. When the container stops,
+it lets a heartbeat in flight finish, then signs the host off.
+
 See [platform support](../docs/platform-support.md) for security and scope.

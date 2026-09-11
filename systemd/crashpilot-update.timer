@@ -1,5 +1,5 @@
 [Unit]
-Description=CrashPilotX Daily Agent Update Check
+Description=CrashPilotX Hourly Agent Update Check
 
 [Timer]
 OnBootSec=10m

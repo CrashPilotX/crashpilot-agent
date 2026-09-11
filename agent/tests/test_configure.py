@@ -119,6 +119,25 @@ class TestConfigure:
         result = runner.invoke(app, ["configure", conn_str])
         assert result.exit_code != 0
 
+    def test_connection_string_from_the_environment(self, tmp_path, monkeypatch):
+        # install.sh passed it as an argument, readable by every user in
+        # /proc/<pid>/cmdline while configure ran.
+        monkeypatch.setenv("CRASHPILOT_CONNECT", _make_conn_str(token="from-env"))
+        result = runner.invoke(app, ["configure"])
+        assert result.exit_code == 0, result.output
+        assert "CRASHPILOT_SUPABASE_TOKEN=from-env" in (tmp_path / ".env").read_text()
+
+    def test_connection_string_from_stdin(self, tmp_path):
+        result = runner.invoke(app, ["configure", "-"], input=_make_conn_str(token="from-stdin") + "\n")
+        assert result.exit_code == 0, result.output
+        assert "CRASHPILOT_SUPABASE_TOKEN=from-stdin" in (tmp_path / ".env").read_text()
+
+    def test_no_connection_string_at_all_is_explained(self, monkeypatch):
+        monkeypatch.delenv("CRASHPILOT_CONNECT", raising=False)
+        result = runner.invoke(app, ["configure"])
+        assert result.exit_code == 1
+        assert "CRASHPILOT_CONNECT" in result.output
+
     def test_success_message_shown(self):
         """Success output should confirm the agent connected / saved credentials."""
         conn_str = _make_conn_str()
@@ -286,6 +305,87 @@ class TestHeartbeat:
         # crash_bad stays queued (visible in "doctor"'s pending count) rather
         # than being silently discarded, but it must not have blocked
         # crash_good from going out.
+        assert count_unpushed() == 1
+
+    def _queue_one(self, monkeypatch, report_id: str) -> None:
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "https://x.supabase.co")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_ANON_KEY", "anon-key")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_SYSTEM_ID", "77777777-7777-7777-7777-777777777777")
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_TOKEN", "tok")
+        import crashpilot.config as cfg_mod
+        cfg_mod._settings = None
+
+        from crashpilot.storage.store import init_db, save_report
+        init_db()
+        save_report({
+            "id": report_id,
+            "boot_id": f"boot_{report_id}",
+            "detected_at": "2026-01-01T00:00:00+00:00",
+            "crash_time": None,
+            "crash_type": "oom_kill",
+            "severity": "high",
+            "summary": "queued",
+            "telemetry": {"platform": {"type": "bare_metal"}},
+            "analysis": {"ai_analyzed": False},
+        })
+
+    @staticmethod
+    def _push_answering(status: int, attempts: list[str]):
+        import httpx
+
+        async def _push(*, report, **_):
+            attempts.append(report["id"])
+            request = httpx.Request("POST", "https://x.supabase.co/rest/v1/rpc/agent_push_report")
+            response = httpx.Response(status, request=request, json={"message": "no"})
+            raise httpx.HTTPStatusError("refused", request=request, response=response)
+
+        return _push
+
+    def test_a_report_the_server_keeps_rejecting_is_set_aside(self, monkeypatch):
+        # A 4xx used to be skipped but never recorded, so the same report was
+        # re-sent every minute forever.
+        from crashpilot.storage.store import MAX_PUSH_REJECTIONS, count_set_aside, count_unpushed
+
+        self._queue_one(monkeypatch, "crash_rejected")
+        attempts: list[str] = []
+        monkeypatch.setattr("crashpilot.cloud_push.push_report", self._push_answering(422, attempts))
+
+        for _ in range(MAX_PUSH_REJECTIONS + 2):
+            result = runner.invoke(app, ["heartbeat", "--quiet"])
+            assert result.exit_code == 0, result.output
+
+        assert attempts == ["crash_rejected"] * MAX_PUSH_REJECTIONS
+        assert count_unpushed() == 0
+        assert count_set_aside() == 1
+
+    def test_a_server_outage_is_not_counted_as_a_rejection(self, monkeypatch):
+        from crashpilot.storage.store import MAX_PUSH_REJECTIONS, count_unpushed
+
+        self._queue_one(monkeypatch, "crash_retry")
+        attempts: list[str] = []
+        monkeypatch.setattr("crashpilot.cloud_push.push_report", self._push_answering(503, attempts))
+
+        for _ in range(MAX_PUSH_REJECTIONS + 2):
+            runner.invoke(app, ["heartbeat", "--quiet"])
+
+        assert len(attempts) == MAX_PUSH_REJECTIONS + 2
+        assert count_unpushed() == 1
+
+    @pytest.mark.parametrize("status", [401, 403, 404, 408, 429])
+    def test_refusals_that_are_not_about_the_report_are_not_counted(self, monkeypatch, status):
+        # Auth, a function missing while the schema reloads, a timeout or a
+        # rate limit would refuse every report alike; none of them may set
+        # the queue aside.
+        from crashpilot.storage.store import MAX_PUSH_REJECTIONS, count_unpushed
+
+        self._queue_one(monkeypatch, "crash_throttled")
+        attempts: list[str] = []
+        monkeypatch.setattr("crashpilot.cloud_push.push_report", self._push_answering(status, attempts))
+
+        for _ in range(MAX_PUSH_REJECTIONS + 1):
+            runner.invoke(app, ["heartbeat", "--quiet"])
+
+        assert len(attempts) == MAX_PUSH_REJECTIONS + 1
         assert count_unpushed() == 1
 
     def test_backfill_stops_entirely_on_a_connection_failure(self, monkeypatch):

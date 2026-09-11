@@ -53,14 +53,25 @@ pyinstaller --onefile --clean --noconfirm \
 cp "$DIST/crashpilot" "$STAGE/usr/bin/crashpilot"
 chmod 0755 "$STAGE/usr/bin/crashpilot"
 
-# 3. Stage systemd units with the binary path baked in (/usr/bin/crashpilot)
+# 3. Stage systemd units with the binary path baked in (/usr/bin/crashpilot).
+#    With no install dir, the agent's own default data dir for root is under
+#    /root/.local/share, which the sandboxed boot analysis cannot write, so
+#    the services keep their data in /var/lib/crashpilot (postinstall creates
+#    it 0700).
+PACKAGED_DATA_DIR=/var/lib/crashpilot
 for unit in \
-  crashpilot.service \
+  crashpilot.service crashpilot-signoff.service \
   crashpilot-heartbeat.service crashpilot-heartbeat.timer \
   crashpilot-snapshot.service crashpilot-snapshot.timer \
   crashpilot-update.service crashpilot-update.timer; do
-  sed "s|__CRASHPILOT_BIN__|/usr/bin/crashpilot|g; s|/usr/local/bin/crashpilot|/usr/bin/crashpilot|g" \
-    "$REPO_ROOT/systemd/$unit" > "$STAGE/lib/systemd/system/$unit"
+  sed_args=(-e "s|__CRASHPILOT_BIN__|/usr/bin/crashpilot|g; s|/usr/local/bin/crashpilot|/usr/bin/crashpilot|g")
+  if [[ "$unit" == *.service ]]; then
+    sed_args+=(-e "/^\[Service\]\$/a Environment=CRASHPILOT_DATA_DIR=$PACKAGED_DATA_DIR")
+  fi
+  if [[ "$unit" == crashpilot.service ]]; then
+    sed_args+=(-e "/^\[Service\]\$/a ReadWritePaths=-$PACKAGED_DATA_DIR")
+  fi
+  sed "${sed_args[@]}" "$REPO_ROOT/systemd/$unit" > "$STAGE/lib/systemd/system/$unit"
 done
 
 # 4. Default config (nfpm marks it config|noreplace so upgrades don't clobber it)

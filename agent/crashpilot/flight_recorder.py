@@ -13,6 +13,7 @@ from typing import Any
 
 import psutil
 
+from .redaction import redact_value
 from .storage.store import init_db, list_flight_snapshots, save_flight_snapshot
 
 _SERVICE_PATTERN = re.compile(r"(?:^|/)([^/]+\.service)(?:$|/)")
@@ -87,6 +88,7 @@ def _failed_services() -> list[dict[str, str]]:
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=8,
         )
     except (OSError, subprocess.SubprocessError):
@@ -140,6 +142,7 @@ def _directory_usage() -> list[dict[str, Any]]:
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=20,
         )
     except (OSError, subprocess.SubprocessError):
@@ -208,7 +211,9 @@ def capture_snapshot(*, deep: bool = False) -> dict[str, Any]:
 
 def record_snapshot(*, deep: bool = False) -> dict[str, Any]:
     init_db()
-    snapshot = capture_snapshot(deep=deep)
+    # Process command lines can carry secrets (--db-password=...), and these
+    # snapshots feed the heartbeat, reports and support bundles.
+    snapshot, _ = redact_value(capture_snapshot(deep=deep))
     save_flight_snapshot(snapshot)
     return snapshot
 

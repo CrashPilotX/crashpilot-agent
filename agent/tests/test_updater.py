@@ -281,6 +281,36 @@ def test_every_refreshed_unit_ships_in_the_bundle():
     assert set(updater.REFRESHED_UNITS) <= shipped
 
 
+def test_a_packaged_binary_leaves_updates_to_the_package_manager(tmp_path, monkeypatch):
+    # In the .deb's PyInstaller binary, sys.executable is crashpilot itself,
+    # so `-m pip` failed after downloading the bundle, every hour.
+    monkeypatch.setattr(updater.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(updater, "get_settings", lambda: SimpleNamespace(data_dir=tmp_path))
+    monkeypatch.setattr(updater, "_download", lambda url: pytest.fail("nothing is downloaded"))
+    monkeypatch.setattr(updater.subprocess, "run", lambda *a, **k: pytest.fail("nothing is run"))
+
+    result = updater.install_latest(force=True)
+
+    assert result["updated"] is False
+    assert result["packaged"] is True
+    assert "package manager" in result["message"]
+
+
+def test_the_update_command_explains_a_packaged_install(monkeypatch):
+    from typer.testing import CliRunner
+
+    from crashpilot.main import app
+
+    monkeypatch.setattr(updater.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(updater, "_download", lambda url: pytest.fail("nothing is downloaded"))
+
+    result = CliRunner().invoke(app, ["update"])
+
+    assert result.exit_code == 0, result.output
+    assert "package manager" in result.output
+    assert CliRunner().invoke(app, ["update", "--quiet"]).exit_code == 0
+
+
 def test_safe_extract_rejects_path_traversal(tmp_path):
     bundle_path = tmp_path / "bad.tar.gz"
     bundle_path.write_bytes(_bundle_bytes("../../outside"))

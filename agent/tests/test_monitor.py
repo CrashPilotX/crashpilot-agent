@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+import crashpilot.monitor as monitor_mod
 from crashpilot.monitor import _extract_boot_context, _make_report_id, check_and_analyze
 
 
@@ -18,6 +19,26 @@ class TestMakeReportId:
 
     def test_different_ids_for_different_boots(self):
         assert _make_report_id("boot1") != _make_report_id("boot2")
+
+    def test_unknown_boot_never_yields_a_shared_id(self):
+        # Report IDs are unique across every machine in the cloud. Hashing the
+        # literal "unknown" gave every machine without a boot ID the same one.
+        assert _make_report_id("unknown") != _make_report_id("unknown")
+        assert _make_report_id("unknown").startswith("crash_")
+
+
+class TestKernelBootId:
+    def test_reads_proc_in_journal_format(self, tmp_path):
+        proc = tmp_path / "boot_id"
+        proc.write_text("ad912364-5d6a-4634-af86-0dfcc1c2efb6\n")
+        # journalctl prints the same ID without dashes.
+        assert monitor_mod._kernel_boot_id(proc) == "ad9123645d6a4634af860dfcc1c2efb6"
+
+    def test_missing_or_malformed_is_none(self, tmp_path):
+        assert monitor_mod._kernel_boot_id(tmp_path / "absent") is None
+        bad = tmp_path / "bad"
+        bad.write_text("unknown\n")
+        assert monitor_mod._kernel_boot_id(bad) is None
 
 
 class TestExtractBootContext:
@@ -52,7 +73,24 @@ class TestExtractBootContext:
         assert previous is None
         assert crash_time is None
 
-    def test_no_boots_returns_unknown(self):
+    def test_no_boots_falls_back_to_the_kernel_boot_id(self, monkeypatch):
+        # The journal collector failing (or no journalctl at all) must not
+        # leave the report without a real boot ID.
+        monkeypatch.setattr(monitor_mod, "_kernel_boot_id", lambda: "b" * 32)
+        tel = self._tel(boots=[])
+        current, previous, crash_time = _extract_boot_context(tel)
+        assert current == "b" * 32
+        assert previous is None
+
+    def test_an_unknown_crash_time_is_none_not_empty(self):
+        tel = self._tel(boots=[
+            {"boot_id": "prev", "first_entry": "", "last_entry": ""},
+            {"boot_id": "cur", "first_entry": "", "last_entry": ""},
+        ])
+        assert _extract_boot_context(tel)[2] is None
+
+    def test_no_boots_and_no_kernel_boot_id_returns_unknown(self, monkeypatch):
+        monkeypatch.setattr(monitor_mod, "_kernel_boot_id", lambda: None)
         tel = self._tel(boots=[])
         current, previous, crash_time = _extract_boot_context(tel)
         assert current == "unknown"
@@ -142,6 +180,8 @@ async def test_unknown_boot_id_never_permanently_suppresses_analysis(monkeypatch
     monkeypatch.setenv("CRASHPILOT_ANTHROPIC_API_KEY", "")
     import crashpilot.config as cfg_mod
     cfg_mod._settings = None
+    # Not even the kernel's boot ID is readable.
+    monkeypatch.setattr(monitor_mod, "_kernel_boot_id", lambda: None)
 
     telemetry = {
         "journal": {
@@ -176,3 +216,82 @@ async def test_unknown_boot_id_never_permanently_suppresses_analysis(monkeypatch
         "second call was skipped as \"already analyzed\" even though "
         "boot_id is the non-identifying \"unknown\" sentinel both times"
     )
+    # Neither may take an ID another machine could also produce.
+    assert first["id"] != second["id"]
+
+
+def _bare_metal_platform() -> dict:
+    return {
+        "type": "bare_metal",
+        "distro": "ubuntu",
+        "distro_version": "24.04",
+        "init": "systemd",
+        "kernel": "test",
+        "arch": "x86_64",
+        "hostname": "test-host",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_failed_journal_collector_still_reports_under_the_real_boot(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRASHPILOT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("CRASHPILOT_ANTHROPIC_API_KEY", "")
+    import crashpilot.config as cfg_mod
+    cfg_mod._settings = None
+    monkeypatch.setattr(monitor_mod, "_kernel_boot_id", lambda: "c" * 32)
+
+    async def _collect():
+        return {
+            "journal": {"error": "'list' object has no attribute 'get'", "collector": "journal"},
+            "dmesg": {"full_tail": "", "critical_events": [], "mce_events": ""},
+            "platform": _bare_metal_platform(),
+        }
+
+    monkeypatch.setattr("crashpilot.monitor.collect_telemetry", _collect)
+
+    report = await check_and_analyze(force=False)
+
+    assert report is not None
+    assert report["boot_id"] == "c" * 32
+    assert report["id"] == _make_report_id("c" * 32)
+    # A real boot ID, so this boot is not analyzed twice.
+    assert await check_and_analyze(force=False) is None
+
+
+@pytest.mark.asyncio
+async def test_hardware_signals_do_not_break_analysis(monkeypatch, tmp_path):
+    # EXT4 errors plus a failing SMART disk: the detector attaches its signals
+    # as a dict, which the forensic snapshot used to slice like a list.
+    monkeypatch.setenv("CRASHPILOT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("CRASHPILOT_ANTHROPIC_API_KEY", "")
+    import crashpilot.config as cfg_mod
+    cfg_mod._settings = None
+
+    async def _collect():
+        return {
+            "journal": {
+                "boots": [
+                    {"boot_id": "prev", "first_entry": "t0", "last_entry": "t1"},
+                    {"boot_id": "cur", "first_entry": "t2", "last_entry": "t3"},
+                ],
+                "current_boot_id": "cur",
+                "previous_boot_id": "prev",
+                "shutdown_info": "",
+                "previous_boot_errors": "kernel: EXT4-fs error (device sda1): ext4_find_entry:1455",
+                "previous_boot_logs_tail": "",
+                "oom_events": "",
+            },
+            "dmesg": {"full_tail": "", "critical_events": [], "mce_events": ""},
+            "smart": {"critical_disks": [{"device": "/dev/sda", "health": "FAILED"}]},
+            "thermal": {"thermal_warnings": ["CPU at 99C"]},
+            "platform": _bare_metal_platform(),
+        }
+
+    monkeypatch.setattr("crashpilot.monitor.collect_telemetry", _collect)
+
+    report = await check_and_analyze(force=True)
+
+    assert report is not None
+    assert report["crash_type"] == "disk_error"
+    assert report["analysis"]["heuristic"]["signals"] == {"smart_critical_disks": 1}
+    assert len(report["analysis"]["forensic_snapshot"]["fingerprint"]) == 16

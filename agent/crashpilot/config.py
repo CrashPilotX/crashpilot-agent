@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from typing import Optional
 
@@ -33,15 +34,66 @@ def _find_env_file() -> Path:
     return Path.home() / ".config" / "crashpilot" / ".env"
 
 
+class InsecureSupabaseURL(ValueError):
+    """The Supabase URL is not https://, so nothing is sent to it."""
+
+
+def require_https(url: str) -> str:
+    """The Supabase URL, if it is https://.
+
+    Every call to it carries the agent token. configure and join tokens
+    already insist on https://, and a URL set in the environment (a
+    Kubernetes Secret, a docker .env) must not bypass that. Checked where
+    requests are made rather than when settings load, so a bad URL stops
+    uploads without also stopping local crash analysis.
+    """
+    if not url.lower().startswith("https://"):
+        raise InsecureSupabaseURL(
+            "CRASHPILOT_SUPABASE_URL must start with https:// (refusing to send the agent "
+            "token in plaintext). Fix it in the environment or .env."
+        )
+    return url
+
+
+_INSTALLER_DATA_DIR = Path("/opt/crashpilot/data")
+_PACKAGE_DATA_DIR = Path("/var/lib/crashpilot")
+
+
 def _default_data_dir() -> Path:
     """
     System-wide install (root wrote to /opt/crashpilot) → /opt/crashpilot/data
+    Ubuntu package (its services use /var/lib/crashpilot) → /var/lib/crashpilot
     Per-user install                                     → ~/.local/share/crashpilot
     """
-    system_dir = Path("/opt/crashpilot/data")
+    system_dir = _INSTALLER_DATA_DIR
     if system_dir.parent.exists() and os.access(system_dir.parent, os.W_OK):
         return system_dir
+    if _PACKAGE_DATA_DIR.is_dir() and os.access(_PACKAGE_DATA_DIR, os.W_OK):
+        return _PACKAGE_DATA_DIR
     return Path.home() / ".local" / "share" / "crashpilot"
+
+
+def _make_private_dir(path: Path) -> None:
+    """Create the data dir 0700, and close one that is open.
+
+    It holds the crash database and journal/dmesg caches. Found open when a
+    Kubernetes hostPath (DirectoryOrCreate) or an older install created it
+    0755. Only a directory of our own is tightened: owned by this user, not
+    sticky, and named for crashpilot, so a shared directory someone set
+    CRASHPILOT_DATA_DIR to by mistake (/var/lib, /tmp) is left alone.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        st = path.stat()
+        if (
+            st.st_mode & 0o077
+            and st.st_uid == os.geteuid()
+            and not st.st_mode & stat.S_ISVTX
+            and any("crashpilot" in part.lower() for part in path.resolve().parts[-2:])
+        ):
+            path.chmod(0o700)
+    except OSError:
+        pass
 
 
 class Settings(BaseSettings):
@@ -75,10 +127,8 @@ class Settings(BaseSettings):
     confidence_threshold: float = 0.4
     analysis_timeout: int = 120
 
-    # Agent API authentication token.
-    # Leave empty to auto-generate a token on first run (stored in data_dir/agent.token).
-    # Override with CRASHPILOT_API_TOKEN env var or in .env.
-    api_token: str = ""
+    # The local API's bearer token is generated on first run and kept in
+    # data_dir/agent.token (`crashpilot token` shows it); it is not a setting.
 
     # Cloud push mode: set by `crashpilot configure <connection-string>`.
     # When configured, the agent pushes heartbeats and reports to Supabase
@@ -91,9 +141,13 @@ class Settings(BaseSettings):
     # Self-enrollment. A cpjoin_ join token lets the node enroll itself (and
     # enroll again if its credentials are ever rejected). node_name comes from
     # the Kubernetes downward API; external_id overrides identity detection.
+    # external_id_source records whether the pinned external_id was
+    # "detected" or "explicit": only a detected one is replaced when the
+    # machine turns out to be a copy of the one that enrolled.
     enroll_token: str = ""
     node_name: str = ""
     external_id: str = ""
+    external_id_source: str = ""
 
     # Optional outbound incident notification. Only HTTPS endpoints are used.
     webhook_url: str = ""
@@ -124,7 +178,7 @@ class Settings(BaseSettings):
 
     def model_post_init(self, __context: object) -> None:
         data_dir = self.data_dir or _default_data_dir()
-        data_dir.mkdir(parents=True, exist_ok=True)
+        _make_private_dir(data_dir)
         object.__setattr__(self, "data_dir", data_dir)
 
         if self.db_path is None:

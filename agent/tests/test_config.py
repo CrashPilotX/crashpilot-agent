@@ -41,6 +41,66 @@ class TestSettings:
         assert cfg.data_dir == data_dir
         assert data_dir.exists()
 
+    def test_data_dir_is_private(self, tmp_path, monkeypatch):
+        # The crash database and dmesg caches in it were readable by every
+        # local user: the directory was created 0755 and the files 0644.
+        import os
+        import stat
+
+        data_dir = tmp_path / "crashpilot"
+        monkeypatch.setenv("CRASHPILOT_DATA_DIR", str(data_dir))
+        import crashpilot.config as cfg_mod
+        cfg_mod._settings = None
+        old_umask = os.umask(0o022)
+        try:
+            cfg_mod.get_settings()
+        finally:
+            os.umask(old_umask)
+        assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
+
+    def test_an_existing_open_data_dir_is_closed(self, tmp_path, monkeypatch):
+        # A Kubernetes hostPath (DirectoryOrCreate) or an older install made it 0755.
+        import stat
+
+        data_dir = tmp_path / "var" / "lib" / "crashpilot"
+        data_dir.mkdir(parents=True)
+        data_dir.chmod(0o755)
+        monkeypatch.setenv("CRASHPILOT_DATA_DIR", str(data_dir))
+        import crashpilot.config as cfg_mod
+        cfg_mod._settings = None
+        cfg_mod.get_settings()
+        assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
+
+    def test_a_shared_directory_is_not_closed(self, tmp_path, monkeypatch):
+        # Pointed at a shared directory by mistake: never lock others out of it.
+        import stat
+
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        shared.chmod(0o755)
+        monkeypatch.setenv("CRASHPILOT_DATA_DIR", str(shared))
+        import crashpilot.config as cfg_mod
+        cfg_mod._settings = None
+        cfg_mod.get_settings()
+        assert stat.S_IMODE(shared.stat().st_mode) == 0o755
+
+    def test_default_data_dir_follows_the_install(self, tmp_path, monkeypatch):
+        # The .deb's services keep their data in /var/lib/crashpilot; a CLI run
+        # by hand on that machine must read the same database.
+        import crashpilot.config as cfg_mod
+
+        installer = tmp_path / "opt" / "crashpilot" / "data"
+        package = tmp_path / "var" / "lib" / "crashpilot"
+        monkeypatch.setattr(cfg_mod, "_INSTALLER_DATA_DIR", installer)
+        monkeypatch.setattr(cfg_mod, "_PACKAGE_DATA_DIR", package)
+        home = Path.home() / ".local" / "share" / "crashpilot"
+
+        assert cfg_mod._default_data_dir() == home
+        package.mkdir(parents=True)
+        assert cfg_mod._default_data_dir() == package
+        installer.parent.mkdir(parents=True)
+        assert cfg_mod._default_data_dir() == installer
+
     def test_db_path_defaults_inside_data_dir(self, tmp_path, monkeypatch):
         monkeypatch.delenv("CRASHPILOT_DB_PATH", raising=False)
         data_dir = tmp_path / "mydata"
@@ -112,6 +172,46 @@ class TestSettings:
         s1 = get_settings()
         s2 = get_settings()
         assert s1 is s2
+
+    def test_a_plaintext_supabase_url_is_never_sent_to(self, monkeypatch):
+        # configure and join tokens already insist on https://, but a URL from
+        # the environment (a Kubernetes Secret, a docker .env) was used as is,
+        # sending the agent token in plaintext. It is refused where requests
+        # are made, so settings still load and local analysis still runs.
+        import asyncio
+
+        import crashpilot.config as cfg_mod
+        from crashpilot.cloud_push import push_heartbeat, push_report
+        from crashpilot.config import InsecureSupabaseURL
+        from crashpilot.enrollment import sign_off
+
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "http://abc.supabase.co")
+        cfg_mod._settings = None
+        cfg = cfg_mod.get_settings()
+        assert cfg.supabase_url == "http://abc.supabase.co"
+
+        def _no_network(*_a, **_k):
+            raise AssertionError("a request was made to a plaintext URL")
+
+        monkeypatch.setattr("httpx.post", _no_network)
+        monkeypatch.setattr("httpx.AsyncClient.post", _no_network)
+        url = cfg.supabase_url
+        with pytest.raises(InsecureSupabaseURL, match="must start with https://"):
+            asyncio.run(push_heartbeat(supabase_url=url, anon_key="a", system_id="s", agent_token="t"))
+        with pytest.raises(InsecureSupabaseURL):
+            asyncio.run(push_report(supabase_url=url, anon_key="a", system_id="s", agent_token="t", report={}))
+        with pytest.raises(InsecureSupabaseURL):
+            sign_off(url, "a", "s", "t")
+
+    def test_an_https_or_empty_supabase_url_is_fine(self, monkeypatch):
+        import crashpilot.config as cfg_mod
+
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "https://abc.supabase.co")
+        cfg_mod._settings = None
+        assert cfg_mod.get_settings().supabase_url == "https://abc.supabase.co"
+        monkeypatch.setenv("CRASHPILOT_SUPABASE_URL", "")
+        cfg_mod._settings = None
+        assert cfg_mod.get_settings().supabase_url == ""
 
     def test_db_path_is_not_current_directory(self):
         """Regression: Path('') == PosixPath('.') bug: db_path must not be '.'"""

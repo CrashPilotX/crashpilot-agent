@@ -21,9 +21,20 @@ a pod that started first runs without a token until it is restarted
 Each node enrolls itself on its first heartbeat under `k8s:<node name>`, so
 every node appears as its own system. Its credentials are kept on the node in
 `/var/lib/crashpilot/.env`, so pod restarts and rollouts keep the same system.
-When a pod stops, its `preStop` hook signs the node off, and a node that never
-comes back is retired automatically if the token is ephemeral.
-`k8s/secret.example.yaml` shows the same Secret as a manifest.
+When a pod is stopped, the container stops its heartbeat loop and then signs
+the node off, and a node that never comes back is retired automatically if the
+token is ephemeral. `k8s/secret.example.yaml` shows the same Secret as a
+manifest.
+
+Sign-off needs the pod to be stopped gracefully. `kubectl drain` does not evict
+DaemonSet pods, so a drained node keeps reporting until it shuts down. When a
+node shuts down or is scaled in, pods are only stopped gracefully if kubelet's
+[graceful node shutdown](https://kubernetes.io/docs/concepts/cluster-administration/node-shutdown/)
+is configured (`shutdownGracePeriod`); without it, the node reads as an outage
+rather than a clean shutdown.
+
+The image tag is `:latest`, so the DaemonSet pulls it on every pod start
+(`imagePullPolicy: Always`). Pin a version tag to control upgrades yourself.
 
 The deployment is tested in Kind on every relevant change. It requires
 `hostPID`, host log/sysfs/device mounts, and a privileged container. If your

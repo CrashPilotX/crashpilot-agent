@@ -31,10 +31,12 @@ loops:
 docker build -f docker/Dockerfile -t crashpilot .
 docker run -d --name crashpilot \
   --restart unless-stopped \
+  --stop-timeout 30 \
   --pid host \
   --privileged \
   -p 7878:7878 \
   -v crashpilot-data:/var/lib/crashpilot \
+  -v /etc/machine-id:/etc/machine-id:ro \
   -v /var/log:/var/log:ro \
   -v /run/log/journal:/run/log/journal:ro \
   -v /sys:/sys:ro \
