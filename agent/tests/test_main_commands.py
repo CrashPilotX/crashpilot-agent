@@ -36,6 +36,36 @@ def test_support_bundle_initializes_storage_and_writes_sanitized_files(tmp_path,
     cfg_mod._settings = None
 
 
+def test_support_bundle_redacts_command_lines(tmp_path, monkeypatch):
+    # A snapshot an older agent stored unredacted must not leave the machine
+    # in a bundle that calls itself sanitized.
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("CRASHPILOT_DATA_DIR", str(tmp_path))
+    import crashpilot.config as cfg_mod
+
+    cfg_mod._settings = None
+    from crashpilot.storage.store import init_db, save_flight_snapshot
+
+    init_db()
+    row = {"pid": 7, "name": "migrate", "rss_mb": 50, "command": "migrate --db-password=hunter2hunter2"}
+    save_flight_snapshot({
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "processes": {"memory": [row], "cpu": [row]},
+    })
+    output = tmp_path / "support.tar.gz"
+
+    support_bundle(output=str(output))
+
+    with tarfile.open(output, "r:gz") as archive:
+        member = archive.extractfile("flight-recorder.json")
+        assert member is not None
+        text = member.read().decode()
+    assert "migrate --db-password=[REDACTED" in text
+    assert "hunter2hunter2" not in text
+    cfg_mod._settings = None
+
+
 def test_configure_rejects_non_https_supabase_url(tmp_path, monkeypatch):
     monkeypatch.setenv("CRASHPILOT_CONFIG_DIR", str(tmp_path))
     import crashpilot.config as cfg_mod

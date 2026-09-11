@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from typing import Any
 
 import typer
 import uvicorn
@@ -591,7 +592,7 @@ def heartbeat(
         raise typer.Exit(0)
 
     from .cloud_push import push_heartbeat, push_report
-    from .storage.store import init_db, list_unpushed, mark_pushed
+    from .storage.store import init_db, list_unpushed, mark_push_rejected, mark_pushed
 
     init_db()
 
@@ -615,7 +616,10 @@ def heartbeat(
         # unreachable - every other report would fail identically too)
         # should stop the whole cycle; an HTTP 4xx means this specific
         # report's payload was rejected, so skip just that one and keep
-        # going.
+        # going. Each refusal is counted, and a report refused
+        # MAX_PUSH_REJECTIONS times is set aside rather than re-sent every
+        # minute forever. A timeout or rate limit (408/429) is about the
+        # server, not the report, so it stops the cycle like a 5xx.
         import httpx
 
         flushed = 0
@@ -631,11 +635,13 @@ def heartbeat(
                 mark_pushed(rep["id"])
                 flushed += 1
             except httpx.HTTPStatusError as exc:
-                if 400 <= exc.response.status_code < 500:
+                status = exc.response.status_code
+                if 400 <= status < 500 and status not in (408, 429):
+                    mark_push_rejected(rep["id"])
                     logging.getLogger(__name__).warning(
                         "Backfill push rejected for report %s (HTTP %d) - skipping it, "
                         "continuing with the rest of the queue: %s",
-                        rep.get("id"), exc.response.status_code, exc,
+                        rep.get("id"), status, exc,
                     )
                     continue
                 logging.getLogger(__name__).warning("Backfill push failed: %s", exc)
@@ -726,11 +732,12 @@ def support_bundle(
 
     from .config import get_settings
     from .flight_recorder import summarize_window
+    from .redaction import redact_value
     from .storage.store import init_db, list_reports
 
     cfg = get_settings()
     init_db()
-    payloads = {
+    payloads: dict[str, Any] = {
         "system.json": {
             "agent_version": importlib.metadata.version("crashpilot"),
             "data_dir": str(cfg.data_dir),
@@ -740,6 +747,8 @@ def support_bundle(
         "flight-recorder.json": summarize_window(hours=24),
         "recent-reports.json": list_reports(limit=10),
     }
+    # Snapshots stored by an older agent still hold full command lines.
+    payloads, _ = redact_value(payloads)
     output_path = Path(output).expanduser().resolve()
     with tarfile.open(output_path, "w:gz") as archive:
         for name, payload in payloads.items():
@@ -781,7 +790,7 @@ def doctor() -> None:
 
     from . import config as cfg_mod
     from .cloud_push import push_heartbeat
-    from .storage.store import count_reports, count_unpushed, init_db
+    from .storage.store import count_reports, count_set_aside, count_unpushed, init_db
 
     init_db()
     cfg = cfg_mod.get_settings()
@@ -904,6 +913,10 @@ def doctor() -> None:
                "They retry on each heartbeat. Run `sudo crashpilot heartbeat` to flush now.")
     else:
         report("Pending uploads", "ok", "none: all reports delivered")
+    set_aside = count_set_aside()
+    if set_aside:
+        report("Refused uploads", "warn", f"{set_aside} report(s) the dashboard kept refusing",
+               "No longer retried; they stay on this machine (`crashpilot list-reports`).")
 
     console.print()
     if problems:

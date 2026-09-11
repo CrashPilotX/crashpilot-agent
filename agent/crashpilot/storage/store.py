@@ -9,6 +9,11 @@ from typing import Generator
 
 from ..config import get_settings
 
+# A report the cloud refuses this many times (an HTTP 4xx, not an outage) is
+# set aside: kept locally, but no longer re-sent every minute or left at the
+# head of the oldest-first backfill queue, where it held up newer reports.
+MAX_PUSH_REJECTIONS = 5
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS crash_reports (
     id          TEXT PRIMARY KEY,
@@ -21,6 +26,7 @@ CREATE TABLE IF NOT EXISTS crash_reports (
     telemetry   TEXT NOT NULL,   -- JSON blob
     analysis    TEXT,            -- JSON blob, NULL until analyzed
     pushed      INTEGER NOT NULL DEFAULT 0,  -- 1 once confirmed in the cloud
+    push_rejections INTEGER NOT NULL DEFAULT 0,  -- times the cloud refused it (HTTP 4xx)
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
@@ -79,12 +85,15 @@ def _conn() -> Generator[sqlite3.Connection, None, None]:
 def init_db() -> None:
     with _conn() as con:
         con.executescript(SCHEMA)
-        # Migration: add `pushed` to databases created before cloud backfill existed.
+        # Migration: add columns to databases created before they existed
+        # (`pushed` came with cloud backfill, `push_rejections` later).
         cols = {row[1] for row in con.execute("PRAGMA table_info(crash_reports)")}
-        if "pushed" not in cols:
+        for column in ("pushed", "push_rejections"):
+            if column in cols:
+                continue
             try:
                 con.execute(
-                    "ALTER TABLE crash_reports ADD COLUMN pushed INTEGER NOT NULL DEFAULT 0"
+                    f"ALTER TABLE crash_reports ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
                 )
             except sqlite3.OperationalError:
                 # Another process (e.g. the heartbeat loop starting alongside the
@@ -169,16 +178,25 @@ def mark_pushed(report_id: str) -> None:
         con.execute("UPDATE crash_reports SET pushed=1 WHERE id=?", (report_id,))
 
 
+def mark_push_rejected(report_id: str) -> None:
+    """Count one refusal of this report by the cloud (see MAX_PUSH_REJECTIONS)."""
+    with _conn() as con:
+        con.execute(
+            "UPDATE crash_reports SET push_rejections = push_rejections + 1 WHERE id=?",
+            (report_id,),
+        )
+
+
 def list_unpushed(limit: int = 50) -> list[dict]:
     """Return reports not yet confirmed in the cloud (oldest first), with
     telemetry and analysis decoded: ready to hand to push_report()."""
     with _conn() as con:
         rows = con.execute(
             """SELECT * FROM crash_reports
-               WHERE pushed = 0
+               WHERE pushed = 0 AND push_rejections < ?
                ORDER BY COALESCE(crash_time, detected_at) ASC
                LIMIT ?""",
-            (limit,),
+            (MAX_PUSH_REJECTIONS, limit),
         ).fetchall()
     result = []
     for row in rows:
@@ -194,7 +212,18 @@ def count_unpushed() -> int:
     """Number of reports still waiting to reach the cloud."""
     with _conn() as con:
         row = con.execute(
-            "SELECT COUNT(*) FROM crash_reports WHERE pushed = 0"
+            "SELECT COUNT(*) FROM crash_reports WHERE pushed = 0 AND push_rejections < ?",
+            (MAX_PUSH_REJECTIONS,),
+        ).fetchone()
+    return row[0] if row else 0
+
+
+def count_set_aside() -> int:
+    """Number of reports the cloud kept refusing, no longer retried."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT COUNT(*) FROM crash_reports WHERE pushed = 0 AND push_rejections >= ?",
+            (MAX_PUSH_REJECTIONS,),
         ).fetchone()
     return row[0] if row else 0
 
@@ -256,15 +285,21 @@ def save_flight_snapshot(snapshot: dict, retention_hours: int = 48) -> None:
 
 
 def list_flight_snapshots(hours: int = 1, limit: int = 240) -> list[dict]:
+    """The newest `limit` snapshots in the window, oldest first.
+
+    Rows stamped in the future (taken while the clock ran ahead) are left
+    out: newest-first, they would otherwise pose as the latest sample.
+    """
     with _conn() as con:
         rows = con.execute(
             """SELECT snapshot FROM flight_snapshots
                WHERE datetime(captured_at) >= datetime('now', ? || ' hours')
-               ORDER BY captured_at ASC
+                 AND datetime(captured_at) <= datetime('now')
+               ORDER BY captured_at DESC
                LIMIT ?""",
             (f"-{hours}", limit),
         ).fetchall()
-    return [json.loads(row["snapshot"]) for row in rows]
+    return [json.loads(row["snapshot"]) for row in reversed(rows)]
 
 
 def enqueue_webhook_delivery(delivery: dict) -> str:

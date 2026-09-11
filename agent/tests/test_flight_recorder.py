@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from crashpilot import flight_recorder
 
 
@@ -99,3 +101,23 @@ def test_record_snapshot_persists_capture(monkeypatch):
 
     assert flight_recorder.record_snapshot(deep=True) == captured
     assert saved == [captured]
+
+
+def test_record_snapshot_redacts_command_lines_before_saving(monkeypatch):
+    # Top processes carry their full command line, and a password passed as
+    # an argument went into the database and on to the dashboard as is.
+    row = {"pid": 7, "name": "migrate", "command": "migrate --db-password=hunter2hunter2 --verbose"}
+    captured = {
+        "captured_at": "2026-06-18T00:00:00+00:00",
+        "processes": {"memory": [row], "cpu": [row]},
+    }
+    saved: list[dict] = []
+    monkeypatch.setattr(flight_recorder, "init_db", lambda: None)
+    monkeypatch.setattr(flight_recorder, "capture_snapshot", lambda deep=False: captured)
+    monkeypatch.setattr(flight_recorder, "save_flight_snapshot", saved.append)
+
+    returned = flight_recorder.record_snapshot()
+
+    assert "hunter2hunter2" not in json.dumps(saved)
+    assert "hunter2hunter2" not in json.dumps(returned)
+    assert saved[0]["processes"]["memory"][0]["command"].startswith("migrate --db-password=[REDACTED")

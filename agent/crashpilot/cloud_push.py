@@ -20,13 +20,18 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
+
+from .redaction import redact_value
 
 log = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(10.0)
+# Tool output is decoded with errors="replace" throughout: firmware strings in
+# dmidecode, device models in lsblk and mount points in df are not always
+# UTF-8, and a strict decode failed the whole heartbeat every minute.
 _LIVE_DMESG_TTL_SECONDS = 300
 _LIVE_DMESG_TAIL_CHARS = 800
 _LIVE_DMESG_MAX_CRITICAL = 10
@@ -168,6 +173,7 @@ def _collect_disk_usage() -> dict[str, Any]:
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
@@ -282,6 +288,7 @@ def _collect_speedtest_capacity() -> dict[str, Any] | None:
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -497,6 +504,7 @@ def _collect_live_dmesg() -> dict[str, Any]:
                 check=False,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=10,
             )
         except (OSError, subprocess.SubprocessError):
@@ -534,6 +542,7 @@ def _systemctl_unit_state(unit: str) -> tuple[str | None, str | None]:
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
@@ -584,7 +593,7 @@ def _collect_cpu_hardware() -> dict[str, Any]:
 
     if shutil.which("lscpu"):
         try:
-            result = subprocess.run(["lscpu", "-J"], check=False, capture_output=True, text=True, timeout=5)
+            result = subprocess.run(["lscpu", "-J"], check=False, capture_output=True, text=True, errors="replace", timeout=5)
             if result.returncode == 0:
                 payload = json.loads(result.stdout)
                 fields = {
@@ -628,7 +637,7 @@ def _collect_memory_hardware() -> dict[str, Any]:
     if not shutil.which("dmidecode"):
         return {"available": False, "error": "dmidecode not installed"}
     try:
-        result = subprocess.run(["dmidecode", "--type", "memory"], check=False, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["dmidecode", "--type", "memory"], check=False, capture_output=True, text=True, errors="replace", timeout=10)
     except (OSError, subprocess.SubprocessError) as exc:
         return {"available": False, "error": str(exc)}
     if result.returncode != 0:
@@ -681,6 +690,7 @@ def _collect_block_devices() -> list[dict[str, Any]]:
             check=False,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
@@ -1078,6 +1088,16 @@ def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
     return health
 
 
+def _isolated(section: str, build: Callable[[], Any]) -> Any:
+    """Build one heartbeat section. A failure leaves out that section (None)
+    instead of failing the heartbeat, which would mark the node offline."""
+    try:
+        return build()
+    except Exception as exc:
+        log.warning("Heartbeat section %s failed; sending the heartbeat without it: %s", section, exc)
+        return None
+
+
 def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
     """Small heartbeat payload for near-live resource load in the dashboard.
 
@@ -1103,7 +1123,7 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
     except OSError:
         metrics["cpu"] = {"cpu_count": cpu_count}
 
-    mem = _read_meminfo()
+    mem = _isolated("memory", _read_meminfo)
     if mem:
         total_kb = mem.get("MemTotal", 0)
         available_kb = mem.get("MemAvailable", mem.get("MemFree", 0))
@@ -1119,13 +1139,13 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
             "swap_total_gb": round(swap_total_kb / 1024 / 1024, 2),
         }
 
-    disk = _collect_disk_usage()
+    disk = _isolated("disk", _collect_disk_usage)
     if disk:
         if slim:
             disk = {key: value for key, value in disk.items() if key != "filesystems"}
         metrics["disk"] = disk
 
-    network = _collect_network_usage()
+    network = _isolated("network", _collect_network_usage)
     if network:
         if slim:
             network = {key: value for key, value in network.items() if key != "speedtest"}
@@ -1142,6 +1162,7 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
                 check=False,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=5,
             )
             gpus = []
@@ -1191,13 +1212,17 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
     updates: dict[str, float] = {}
 
     if not slim:
+        # A section that fails is left out and not marked sent, so it is
+        # tried again when next due.
         if now - sent_at.get("hardware_profile", 0) >= _HARDWARE_SECTION_TTL_SECS:
-            metrics["hardware_profile"] = _build_hardware_profile_metrics()
-            updates["hardware_profile"] = now
+            hardware = _isolated("hardware_profile", _build_hardware_profile_metrics)
+            if hardware is not None:
+                metrics["hardware_profile"] = hardware
+                updates["hardware_profile"] = now
 
         # dmesg: collect every tick (uses 5-min file cache), include only when due.
-        dmesg = _collect_live_dmesg()
-        if now - sent_at.get("dmesg", 0) >= _DMESG_SECTION_TTL_SECS:
+        dmesg = _isolated("dmesg", _collect_live_dmesg)
+        if dmesg is not None and now - sent_at.get("dmesg", 0) >= _DMESG_SECTION_TTL_SECS:
             metrics["dmesg"] = dmesg
             updates["dmesg"] = now
 
@@ -1217,8 +1242,10 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
 
         # agent_health: version, timer states, tool availability; include when due.
         if now - sent_at.get("agent_health", 0) >= _AGENT_HEALTH_SECTION_TTL_SECS:
-            metrics["agent_health"] = _build_agent_health(dmesg)
-            updates["agent_health"] = now
+            health = _isolated("agent_health", lambda: _build_agent_health(dmesg or {}))
+            if health is not None:
+                metrics["agent_health"] = health
+                updates["agent_health"] = now
 
         if updates:
             _save_section_ttl(section_path, {**sent_at, **updates})
@@ -1253,6 +1280,7 @@ def _maybe_start_remote_update(status: dict[str, Any]) -> None:
                 check=False,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=10,
             )
             if result.returncode != 0:
@@ -1372,6 +1400,10 @@ async def push_heartbeat(
             bytes_used,
             hard_limit_bytes,
         )
+
+    # Crash reports are redacted in monitor.py; the heartbeat carries its own
+    # copies of process command lines and kernel log text.
+    heartbeat_metrics, _ = redact_value(heartbeat_metrics)
 
     url = f"{supabase_url.rstrip('/')}/rest/v1/rpc/agent_heartbeat"
     payload = {
