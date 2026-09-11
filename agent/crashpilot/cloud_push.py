@@ -1269,6 +1269,20 @@ def _maybe_start_remote_update(status: dict[str, Any]) -> None:
         log.warning("Remote CrashPilot update request failed: %s", exc)
 
 
+class CredentialsRejected(RuntimeError):
+    """Supabase does not recognise this system_id / agent_token pair.
+
+    Raised instead of a plain RuntimeError so a node that enrolled with a
+    join token can enroll again (its credentials were replaced by a newer
+    enrollment of the same identity, or by a restore from the dashboard).
+    """
+
+
+def _credentials_rejected(exc: httpx.HTTPStatusError) -> bool:
+    body = exc.response.text or ""
+    return exc.response.status_code == 400 and "Invalid system_id or agent_token" in body
+
+
 def _explain_http_error(exc: httpx.HTTPStatusError) -> str:
     """Turn a Supabase REST error into an actionable message.
 
@@ -1380,6 +1394,8 @@ async def push_heartbeat(
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            if _credentials_rejected(exc):
+                raise CredentialsRejected(_explain_http_error(exc)) from exc
             raise RuntimeError(_explain_http_error(exc)) from exc
 
     response_data: dict[str, Any] = {}

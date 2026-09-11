@@ -28,6 +28,14 @@ def main() -> None:
         text=True,
     )
     require(help_result.stdout, "--connect", "installer help should document dashboard connection")
+    require(help_result.stdout, "--enroll", "installer help should document join-token enrollment")
+
+    both = subprocess.run(
+        ["bash", INSTALLER_FOR_BASH, "--connect", "cpilot_x", "--enroll", "cpjoin_y"],
+        cwd=ROOT, check=False, capture_output=True, text=True,
+    )
+    if both.returncode == 0 or "not both" not in both.stderr:
+        raise AssertionError("--connect and --enroll together must be refused before installing")
 
     missing_connect_result = subprocess.run(
         ["bash", INSTALLER_FOR_BASH, "--connect"],
@@ -69,6 +77,9 @@ def main() -> None:
     require(script, "crashpilot-update.timer", "systemd installs should enable verified automatic updates")
     require(script, "Automatic updates: enabled", "installer summary should confirm automatic updates")
     require(script, "crashpilot-snapshot.timer", "systemd installs should enable the flight recorder")
+    require(script, "crashpilot-signoff.service", "systemd installs should sign off on clean shutdown")
+    require(script, 'systemctl enable --now crashpilot-signoff.service', "the sign-off unit must be started so its ExecStop runs at shutdown")
+    require(script, '"$CRASHPILOT_BIN" enroll "$ENROLL_STRING"', "--enroll should hand the join token to `crashpilot enroll`")
     require(script, "Flight recorder: enabled", "installer summary should confirm the flight recorder")
     require(script, "speedtest-cli", "installer should set up internet capacity checks automatically")
     require(script, "install_speedtest_cli", "speedtest capacity support should be installed without an interactive prompt")

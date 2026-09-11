@@ -127,9 +127,12 @@ section() { echo -e "\n${BOLD}── $* ─────────────�
 # ── Parse arguments ─────────────────────────────────────────────────────────
 # --connect <cpilot_…>  : after installing, configure push mode and bring the
 #                         system online in one shot (the dashboard one-liner).
-# A bare cpilot_… positional argument is also accepted.
-# Can also be supplied via the CRASHPILOT_CONNECT environment variable.
+# --enroll <cpjoin_…>   : after installing, enroll this machine with a join
+#                         token (cloud-init, machine images, automated fleets).
+# Bare cpilot_… / cpjoin_… positional arguments are also accepted, and both can
+# come from the CRASHPILOT_CONNECT / CRASHPILOT_ENROLL environment variables.
 CONNECT_STRING="${CRASHPILOT_CONNECT:-}"
+ENROLL_STRING="${CRASHPILOT_ENROLL:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --connect)
@@ -147,15 +150,37 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       shift ;;
+    --enroll)
+      if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+        err "--enroll requires a cpjoin_<join-token> value."
+        echo "Usage: install.sh --enroll cpjoin_<join-token>"
+        exit 2
+      fi
+      ENROLL_STRING="$2"; shift 2 ;;
+    --enroll=*)
+      ENROLL_STRING="${1#*=}"
+      if [[ -z "$ENROLL_STRING" ]]; then
+        err "--enroll requires a cpjoin_<join-token> value."
+        echo "Usage: install.sh --enroll cpjoin_<join-token>"
+        exit 2
+      fi
+      shift ;;
     cpilot_*)       CONNECT_STRING="$1"; shift ;;
+    cpjoin_*)       ENROLL_STRING="$1"; shift ;;
     -h|--help)
-      echo "Usage: install.sh [--connect cpilot_<connection-string>]"
-      echo "  --connect <string>   Install, then connect to the dashboard (push mode)."
-      echo "  (a bare cpilot_… argument or \$CRASHPILOT_CONNECT also works)"
+      echo "Usage: install.sh [--connect cpilot_<connection-string> | --enroll cpjoin_<join-token>]"
+      echo "  --connect <string>   Install, then connect this system to the dashboard (push mode)."
+      echo "  --enroll <token>     Install, then enroll this machine with a join token (automated fleets)."
+      echo "  (bare cpilot_…/cpjoin_… arguments, or \$CRASHPILOT_CONNECT / \$CRASHPILOT_ENROLL, also work)"
       exit 0 ;;
     *)              warn "Ignoring unknown argument: $1"; shift ;;
   esac
 done
+
+if [[ -n "$CONNECT_STRING" && -n "$ENROLL_STRING" ]]; then
+  err "Use either --connect (one system from the dashboard) or --enroll (a join token), not both."
+  exit 2
+fi
 
 banner() {
 cat << 'EOF'
@@ -599,6 +624,12 @@ install_systemd_services() {
     INSTALL_PROBLEMS+=("could not install the core systemd units")
     return 1
   fi
+  # Signs off on a clean shutdown, so a reboot or scale-in reads as expected
+  # quiet rather than an outage. It has to be started now for its ExecStop to
+  # run at shutdown.
+  if [[ -f "$service_src/crashpilot-signoff.service" ]]; then
+    install_unit "$service_src/crashpilot-signoff.service" crashpilot-signoff.service || failed=1
+  fi
 
   # Heartbeat, the verified daily update check, and the rolling flight
   # recorder. Each ships as a service plus a timer; install whichever this
@@ -623,6 +654,9 @@ install_systemd_services() {
       _sudo systemctl enable --now "$timer" >/dev/null 2>&1 || failed=1
     fi
   done
+  if [[ -f /etc/systemd/system/crashpilot-signoff.service ]]; then
+    _sudo systemctl enable --now crashpilot-signoff.service >/dev/null 2>&1 || failed=1
+  fi
 
   if [[ $failed -ne 0 ]]; then
     INSTALL_PROBLEMS+=("some systemd units could not be installed or enabled; check: systemctl status 'crashpilot*'")
@@ -751,6 +785,24 @@ if [[ -n "$CONNECT_STRING" ]]; then
     err "Could not connect with that connection string."
     err "Get a fresh one from the dashboard → Systems → Add system."
     INSTALL_PROBLEMS+=("connecting to the dashboard failed")
+  fi
+fi
+
+# ── Enroll with a join token (automated fleets) ────────────────────────────────
+#   curl -fsSL .../install.sh | sudo bash -s -- --enroll cpjoin_<token>
+if [[ -n "$ENROLL_STRING" ]]; then
+  section "Enrolling with the dashboard"
+  if [[ -z "$CRASHPILOT_BIN" ]]; then
+    err "Cannot enroll: the CrashPilot CLI is not available."
+    INSTALL_PROBLEMS+=("enrolling with the dashboard failed")
+  elif "$CRASHPILOT_BIN" enroll "$ENROLL_STRING"; then
+    # `enroll` saves this machine's own credentials, enables the timers, and
+    # sends the first heartbeat, so it is online as soon as this returns.
+    CONNECTED=1
+  else
+    err "Could not enroll with that join token."
+    err "Check it on the dashboard's Systems page: it may be revoked, expired, or used up."
+    INSTALL_PROBLEMS+=("enrolling with the dashboard failed")
   fi
 fi
 

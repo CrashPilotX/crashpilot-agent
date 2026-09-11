@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from pathlib import Path
 
 import typer
@@ -306,9 +305,6 @@ def configure(
     """[bold]Configure[/bold] push mode using the connection string from the dashboard."""
     import base64
     import json
-    import re
-    import shutil
-    import subprocess
 
     from . import config as cfg_mod
     from .cloud_push import push_heartbeat
@@ -338,56 +334,26 @@ def configure(
         console.print("[red]Connection string's Supabase URL must be https:// - refusing to configure a non-TLS endpoint.[/red]")
         raise typer.Exit(1)
 
-    env_path = cfg_mod._find_env_file()
+    from .enrollment import env_file_for_write, write_env_values
 
-    lines_to_add = {
-        "CRASHPILOT_SUPABASE_URL": cfg_data["url"],
-        "CRASHPILOT_SUPABASE_ANON_KEY": cfg_data["key"],
-        "CRASHPILOT_SUPABASE_SYSTEM_ID": cfg_data["system_id"],
-        "CRASHPILOT_SUPABASE_TOKEN": cfg_data["token"],
-    }
-
-    # Read existing .env
-    existing = ""
-    if env_path.exists():
-        existing = env_path.read_text()
-
-    new_lines = []
-    for key, value in lines_to_add.items():
-        pattern = re.compile(rf"^{key}=.*", re.MULTILINE)
-        if pattern.search(existing):
-            existing = pattern.sub(f"{key}={value}", existing)
-        else:
-            new_lines.append(f"{key}={value}")
-
-    content = existing.rstrip("\n") + "\n" + "\n".join(new_lines) + "\n"
-    env_path.write_text(content)
+    env_path = env_file_for_write(cfg_mod._find_env_file())
     try:
-        os.chmod(env_path, 0o600)
-    except PermissionError:
-        console.print(f"[yellow]![/yellow] Could not tighten permissions on {env_path}")
+        write_env_values(env_path, {
+            "CRASHPILOT_SUPABASE_URL": cfg_data["url"],
+            "CRASHPILOT_SUPABASE_ANON_KEY": cfg_data["key"],
+            "CRASHPILOT_SUPABASE_SYSTEM_ID": cfg_data["system_id"],
+            "CRASHPILOT_SUPABASE_TOKEN": cfg_data["token"],
+        })
+    except (OSError, ValueError) as e:
+        console.print(f"[red]Could not save credentials to {env_path}: {e}[/red]")
+        raise typer.Exit(1) from e
 
     console.print(f"[green]✓[/green] Connected: credentials saved to {env_path}")
 
     # Reload settings so the heartbeat below picks up the new credentials.
     cfg_mod._settings = None
 
-    # Enable + start the heartbeat timer so the system stays online (best-effort:
-    # systemd may be absent, e.g. in WSL or minimal Ubuntu environments).
-    timer_enabled = False
-    if shutil.which("systemctl"):
-        try:
-            subprocess.run(
-                ["systemctl", "enable", "--now", "crashpilot-heartbeat.timer"],
-                check=True, capture_output=True,
-            )
-            subprocess.run(
-                ["systemctl", "enable", "--now", "crashpilot-update.timer"],
-                check=False, capture_output=True,
-            )
-            timer_enabled = True
-        except (subprocess.CalledProcessError, OSError):
-            pass
+    timer_enabled = _enable_push_timers()
 
     # Send one heartbeat now so the system appears online immediately.
     cfg2 = cfg_mod.get_settings()
@@ -411,6 +377,177 @@ def configure(
         )
 
 
+def _enable_push_timers() -> bool:
+    """Enable the heartbeat and update timers, and the clean-shutdown sign-off.
+
+    Best-effort: systemd may be absent (WSL without systemd, minimal images).
+    Returns whether the heartbeat timer is running.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("systemctl"):
+        return False
+    try:
+        subprocess.run(
+            ["systemctl", "enable", "--now", "crashpilot-heartbeat.timer"],
+            check=True, capture_output=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return False
+    for unit in ("crashpilot-update.timer", "crashpilot-signoff.service"):
+        try:
+            subprocess.run(["systemctl", "enable", "--now", unit], check=False, capture_output=True)
+        except OSError:
+            pass
+    return True
+
+
+def _credentials_work(url: str, anon_key: str, system_id: str, agent_token: str) -> bool:
+    """Whether the stored credentials are accepted right now."""
+    import httpx
+
+    if not (url and anon_key and system_id and agent_token):
+        return False
+    try:
+        resp = httpx.post(
+            f"{url.rstrip('/')}/rest/v1/rpc/agent_system_status",
+            headers={"apikey": anon_key, "Authorization": f"Bearer {anon_key}"},
+            json={"p_system_id": system_id, "p_agent_token": agent_token},
+            timeout=10.0,
+        )
+    except httpx.HTTPError:
+        return False
+    return resp.status_code == 200
+
+
+def _enroll_and_store(join_token: str, external_id: str, *, persist_token: bool) -> dict:
+    """Enroll with a join token and save the node's credentials. Raises on failure."""
+    from . import config as cfg_mod
+    from .cloud_push import _agent_version, _hostname
+    from .enrollment import (
+        enroll,
+        env_file_for_write,
+        parse_join_token,
+        resolve_identity,
+        write_env_values,
+    )
+
+    cfg = cfg_mod.get_settings()
+    token = parse_join_token(join_token)
+    identity = resolve_identity(external_id or cfg.external_id, cfg.node_name)
+    result = enroll(token, identity, _hostname(), _agent_version())
+
+    values = {
+        "CRASHPILOT_SUPABASE_URL": token.url,
+        "CRASHPILOT_SUPABASE_ANON_KEY": token.anon_key,
+        "CRASHPILOT_SUPABASE_SYSTEM_ID": str(result["system_id"]),
+        "CRASHPILOT_SUPABASE_TOKEN": str(result["agent_token"]),
+        # Pin the identity this node enrolled under. Re-enrollment must use
+        # exactly the same one: detected afresh, an explicit --external-id is
+        # forgotten and a flaky metadata service changes the answer, and
+        # either way the node enrolls as a brand-new system. That created
+        # duplicates and walked straight past a retire-by-hand.
+        "CRASHPILOT_EXTERNAL_ID": identity,
+    }
+    # Keep the join token only when it was handed to this command. One that
+    # arrives through the environment (a Kubernetes Secret) stays there
+    # rather than being copied onto the node's disk.
+    if persist_token:
+        values["CRASHPILOT_ENROLL_TOKEN"] = join_token.strip().strip("'\"")
+    env_path = env_file_for_write(cfg_mod._find_env_file())
+    write_env_values(env_path, values)
+    cfg_mod._settings = None
+    return {**result, "identity": identity, "env_path": str(env_path)}
+
+
+@app.command()
+def enroll(
+    join_token: str = typer.Argument("", help="Join token from the dashboard (starts with cpjoin_). Defaults to CRASHPILOT_ENROLL_TOKEN."),
+    external_id: str = typer.Option("", "--external-id", help="Identity to enroll under. Detected automatically when omitted: Kubernetes node name, then cloud instance ID, then machine ID."),
+    force: bool = typer.Option(False, "--force", help="Enroll even if this machine already has working credentials."),
+) -> None:
+    """[bold]Enroll[/bold] this machine with a join token, for fleets that add machines automatically."""
+    from . import config as cfg_mod
+    from .cloud_push import push_heartbeat
+    from .enrollment import EnrollmentError
+
+    cfg = cfg_mod.get_settings()
+    token_str = join_token or cfg.enroll_token
+    if not token_str:
+        console.print(
+            "[red]No join token.[/red] Pass one ([cyan]crashpilot enroll cpjoin_...[/cyan]) or set "
+            "CRASHPILOT_ENROLL_TOKEN. Create one on the dashboard's Systems page."
+        )
+        raise typer.Exit(1)
+
+    if not force and _credentials_work(
+        cfg.supabase_url, cfg.supabase_anon_key, cfg.supabase_system_id, cfg.supabase_token,
+    ):
+        console.print(f"[green]✓[/green] Already enrolled as system [dim]{cfg.supabase_system_id}[/dim]; nothing to do.")
+        raise typer.Exit(0)
+
+    try:
+        result = _enroll_and_store(
+            token_str, external_id,
+            persist_token=bool(join_token) and join_token.strip() != cfg.enroll_token,
+        )
+    except EnrollmentError as e:
+        console.print(f"[red]✗ Enrollment failed:[/red] {e}")
+        raise typer.Exit(1) from e
+    except Exception as e:
+        console.print(f"[red]✗ Enrollment failed:[/red] could not reach the dashboard: {e}")
+        raise typer.Exit(1) from e
+
+    console.print(
+        f"[green]✓[/green] Enrolled as [bold]{result.get('name') or result['identity']}[/bold] "
+        f"(identity [dim]{result['identity']}[/dim]); credentials saved to {result['env_path']}"
+    )
+
+    timer_enabled = _enable_push_timers()
+    cfg2 = cfg_mod.get_settings()
+    try:
+        asyncio.run(push_heartbeat(
+            supabase_url=cfg2.supabase_url,
+            anon_key=cfg2.supabase_anon_key,
+            system_id=cfg2.supabase_system_id,
+            agent_token=cfg2.supabase_token,
+        ))
+        console.print("[green]✓[/green] Heartbeat sent: this machine is now online in the dashboard.")
+    except Exception as e:
+        console.print(f"[yellow]![/yellow] Enrolled, but the first heartbeat failed: {e}")
+    if not timer_enabled:
+        console.print(
+            "[dim]Heartbeat timer not enabled automatically (no systemd?). Ensure something runs "
+            "[/dim][cyan]crashpilot heartbeat[/cyan][dim] every ~60s to stay online.[/dim]"
+        )
+
+
+@app.command("sign-off")
+def sign_off_command(
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Print nothing on success (used at shutdown)."),
+) -> None:
+    """[bold]Sign off[/bold]: tell the dashboard this machine is shutting down cleanly.
+
+    Run at shutdown by crashpilot-signoff.service and by the Kubernetes
+    preStop hook. The next heartbeat undoes it, so a reboot needs nothing
+    extra. Always exits 0: a failed sign-off must never hold up a shutdown.
+    """
+    from .config import get_settings
+    from .enrollment import sign_off
+
+    cfg = get_settings()
+    if not (cfg.supabase_url and cfg.supabase_anon_key and cfg.supabase_system_id and cfg.supabase_token):
+        raise typer.Exit(0)
+    try:
+        sign_off(cfg.supabase_url, cfg.supabase_anon_key, cfg.supabase_system_id, cfg.supabase_token)
+    except Exception as e:
+        console.print(f"[yellow]![/yellow] Could not sign off: {e}")
+        raise typer.Exit(0) from None
+    if not quiet:
+        console.print("[green]✓[/green] Signed off: the dashboard will expect this machine to be quiet.")
+
+
 @app.command()
 def heartbeat(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress success output (used by the systemd timer)"),
@@ -421,6 +558,16 @@ def heartbeat(
     from .config import get_settings
 
     cfg = get_settings()
+
+    # A node given only a join token (a Kubernetes Secret, an image with
+    # CRASHPILOT_ENROLL_TOKEN baked in) enrolls on its first heartbeat.
+    if cfg.enroll_token and not (cfg.supabase_system_id and cfg.supabase_token):
+        try:
+            _enroll_and_store(cfg.enroll_token, "", persist_token=False)
+        except Exception as e:
+            console.print(f"[red]✗ Enrollment failed:[/red] {e}")
+            raise typer.Exit(1) from e
+        cfg = get_settings()
 
     # Push mode requires url + anon_key + system_id + token. Tell the user exactly
     # what's missing instead of silently doing nothing.
@@ -505,8 +652,28 @@ def heartbeat(
             await flush_webhook_deliveries(secret=cfg.webhook_secret)
         return flushed
 
+    from .cloud_push import CredentialsRejected
+    from .enrollment import reenroll_allowed
+
     try:
         flushed = asyncio.run(_heartbeat_and_backfill())
+    except CredentialsRejected as e:
+        # A newer enrollment of this same identity, or a restore from the
+        # dashboard, replaced these credentials. A node that has its join token
+        # enrolls again, at most once per cooldown so a node that keeps failing
+        # does not hammer the enrollment endpoint.
+        marker = Path(cfg.data_dir or ".") / "reenroll-attempt"
+        if not (cfg.enroll_token and reenroll_allowed(marker)):
+            console.print(f"[red]✗ Heartbeat failed:[/red] {e}")
+            raise typer.Exit(1) from e
+        console.print("[yellow]![/yellow] Credentials were rejected; enrolling again with the join token.")
+        try:
+            _enroll_and_store(cfg.enroll_token, "", persist_token=False)
+            cfg = get_settings()
+            flushed = asyncio.run(_heartbeat_and_backfill())
+        except Exception as e2:
+            console.print(f"[red]✗ Heartbeat failed after enrolling again:[/red] {e2}")
+            raise typer.Exit(1) from e2
     except Exception as e:
         # Always surface the reason: for manual runs and for `journalctl` when
         # the timer fires. Detailed text comes from cloud_push._explain_http_error.

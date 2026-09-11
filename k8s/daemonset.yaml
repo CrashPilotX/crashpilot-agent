@@ -32,10 +32,29 @@ spec:
           env:
             - name: CRASHPILOT_DATA_DIR
               value: /var/lib/crashpilot
+            # Enrolled credentials are written to $CRASHPILOT_CONFIG_DIR/.env.
+            # Keeping that on the node's hostPath means a pod restart or a
+            # DaemonSet rollout carries on as the same system.
+            - name: CRASHPILOT_CONFIG_DIR
+              value: /var/lib/crashpilot
+            # Each node enrolls under its own node name, so every node is its
+            # own system in the dashboard. (One shared system_id made a whole
+            # cluster report as a single machine.)
+            - name: CRASHPILOT_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           envFrom:
             - secretRef:
                 name: crashpilot-agent
                 optional: true
+          lifecycle:
+            # A drained node or a scaled-in pool reads as "Shut down cleanly"
+            # instead of an outage. The next heartbeat undoes it, so rollouts
+            # are unaffected.
+            preStop:
+              exec:
+                command: ["crashpilot", "sign-off", "--quiet"]
           ports:
             - name: api
               containerPort: 7878

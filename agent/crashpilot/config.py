@@ -88,6 +88,13 @@ class Settings(BaseSettings):
     supabase_system_id: str = ""
     supabase_token: str = ""  # agent token stored in the Supabase systems table
 
+    # Self-enrollment. A cpjoin_ join token lets the node enroll itself (and
+    # enroll again if its credentials are ever rejected). node_name comes from
+    # the Kubernetes downward API; external_id overrides identity detection.
+    enroll_token: str = ""
+    node_name: str = ""
+    external_id: str = ""
+
     # Optional outbound incident notification. Only HTTPS endpoints are used.
     webhook_url: str = ""
     webhook_secret: str = ""
