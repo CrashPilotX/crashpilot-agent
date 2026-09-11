@@ -19,8 +19,40 @@ env:
   NFPM_VERSION: "2.41.0"
 
 jobs:
+  # A tag is published only from a commit that passes the same checks as the
+  # Tests workflow; pushing a v* tag used to publish whatever it pointed at.
+  test:
+    name: Tests and contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and dev dependencies
+        working-directory: agent
+        run: pip install -e ".[dev]" pytest-cov
+
+      - name: Lint, type-check, and test
+        working-directory: agent
+        env:
+          CRASHPILOT_ANTHROPIC_API_KEY: ""
+        run: |
+          ruff check crashpilot/ tests/
+          mypy crashpilot/
+          pytest tests/ --cov=crashpilot --cov-fail-under=60 -q
+
+      - name: Installer and packaging contracts
+        run: |
+          shellcheck -S warning agent/install.sh packaging/*.sh docker/entrypoint.sh
+          python3 ci/test_installer.py
+          python3 ci/check_packaging.py
+
   build:
     name: Build (${{ matrix.arch }})
+    needs: [test]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -64,6 +96,9 @@ jobs:
           dpkg-deb --info dist/*.deb
           test "$(dpkg-deb --field dist/*.deb Architecture)" = "${{ matrix.arch }}"
           dpkg-deb --contents dist/*.deb | grep -q usr/bin/crashpilot
+          dpkg-deb --contents dist/*.deb | grep -q lib/systemd/system/crashpilot-signoff.service
+          # A packaged install updates through apt, not the bundle updater.
+          dist/crashpilot update | grep -q "package manager"
 
       - name: Stage artifacts
         run: |

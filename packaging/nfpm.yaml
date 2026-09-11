@@ -51,6 +51,9 @@ contents:
   - src: dist/stage/lib/systemd/system/crashpilot-update.timer
     dst: /lib/systemd/system/crashpilot-update.timer
 
+  - src: dist/stage/lib/systemd/system/crashpilot-signoff.service
+    dst: /lib/systemd/system/crashpilot-signoff.service
+
   - src: dist/stage/etc/crashpilot/.env
     dst: /etc/crashpilot/.env
     type: config|noreplace

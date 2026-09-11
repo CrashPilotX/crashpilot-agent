@@ -7,6 +7,9 @@ services:
     restart: unless-stopped
     pid: host
     privileged: true
+    # On stop, the entrypoint lets a heartbeat in flight finish and then signs
+    # off; the default 10 s can cut that short.
+    stop_grace_period: 30s
     ports:
       - "7878:7878"
     env_file:
@@ -14,8 +17,13 @@ services:
         required: false
     environment:
       CRASHPILOT_DATA_DIR: /var/lib/crashpilot
+      # Enrolled credentials and the pinned identity go to $CRASHPILOT_CONFIG_DIR/.env:
+      # on the volume, so recreating the container keeps the same system.
+      CRASHPILOT_CONFIG_DIR: /var/lib/crashpilot
     volumes:
       - crashpilot-data:/var/lib/crashpilot
+      # The host's machine ID, so the container enrolls as the host it monitors.
+      - /etc/machine-id:/etc/machine-id:ro
       - /var/log:/var/log:ro
       - /run/log/journal:/run/log/journal:ro
       - /sys:/sys:ro

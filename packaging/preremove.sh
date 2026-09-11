@@ -15,6 +15,8 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl disable --now crashpilot-snapshot.timer >/dev/null 2>&1 || true
     systemctl disable --now crashpilot-update.timer >/dev/null 2>&1 || true
     systemctl disable crashpilot.service >/dev/null 2>&1 || true
+    # Stopping it signs the machine off, while the binary is still here.
+    systemctl disable --now crashpilot-signoff.service >/dev/null 2>&1 || true
 fi
 
 exit 0

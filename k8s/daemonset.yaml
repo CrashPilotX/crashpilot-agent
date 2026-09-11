@@ -22,10 +22,29 @@ spec:
       hostPID: true
       tolerations:
         - operator: Exists
+      # When a pod is stopped, its entrypoint lets a heartbeat in flight
+      # finish, stops the heartbeat loop, then signs the node off, so the node
+      # reads as "Shut down cleanly" rather than an outage (the next heartbeat
+      # undoes it, so rollouts are unaffected). That needs the pod to be
+      # stopped gracefully: on a node shutdown, only kubelet's graceful node
+      # shutdown (shutdownGracePeriod) does that. `kubectl drain` leaves
+      # DaemonSet pods running, so a drained node signs off when it shuts down.
+      terminationGracePeriodSeconds: 30
       containers:
         - name: crashpilot
           image: ghcr.io/crashpilotx/crashpilot-agent:latest
-          imagePullPolicy: IfNotPresent
+          # Always, while the tag is :latest: IfNotPresent kept whatever image
+          # a node pulled first, however old.
+          imagePullPolicy: Always
+          # Requests and limits keep it out of the BestEffort class, the first
+          # evicted under node pressure, exactly when crash evidence matters.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           securityContext:
             privileged: true
             readOnlyRootFilesystem: false
@@ -48,13 +67,6 @@ spec:
             - secretRef:
                 name: crashpilot-agent
                 optional: true
-          lifecycle:
-            # A drained node or a scaled-in pool reads as "Shut down cleanly"
-            # instead of an outage. The next heartbeat undoes it, so rollouts
-            # are unaffected.
-            preStop:
-              exec:
-                command: ["crashpilot", "sign-off", "--quiet"]
           ports:
             - name: api
               containerPort: 7878

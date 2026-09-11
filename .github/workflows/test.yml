@@ -71,6 +71,7 @@ jobs:
         run: |
           shellcheck -S warning agent/install.sh
           shellcheck -S warning packaging/*.sh
+          shellcheck -S warning docker/entrypoint.sh
 
       # These assert the things a broken release would otherwise only reveal on
       # a user's machine: the installer's argument handling and systemd unit
