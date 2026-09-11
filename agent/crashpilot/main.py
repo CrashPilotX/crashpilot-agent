@@ -487,6 +487,7 @@ def _enroll_and_store(
     from .enrollment import (
         enroll,
         env_file_for_write,
+        identity_moved,
         parse_join_token,
         resolve_identity,
         write_env_values,
@@ -502,6 +503,10 @@ def _enroll_and_store(
         # Enrolled before the source was recorded, or set in the environment:
         # treated as chosen, so it is never replaced by a detected one.
         identity, source = cfg.external_id, cfg.external_id_source or "explicit"
+        if source == "detected":
+            # A copy of another machine that got here (its credentials were
+            # rejected, or `enroll --force`) must not enroll as that machine.
+            identity = identity_moved(identity, cfg.node_name) or identity
     else:
         identity, source = resolve_identity("", cfg.node_name), "detected"
     env_path = env_file_for_write(cfg_mod._find_env_file())
@@ -694,11 +699,12 @@ def heartbeat(
     elif (
         cfg.enroll_token and cfg.external_id and cfg.external_id_source == "detected"
         and "CRASHPILOT_EXTERNAL_ID" not in os.environ
-        and not _state_file("retired").exists()
     ):
         # A machine made from an image of an enrolled one carries its pinned
         # identity and credentials, and would report as that machine. Once
-        # per boot, check the detected identity is still this machine's.
+        # per boot, check the detected identity is still this machine's. A
+        # copy that cannot enroll as itself (retired, cooling down, offline)
+        # sends nothing rather than borrow the other machine's credentials.
         from .enrollment import copied_identity, current_boot_id
 
         moved, fresh = copied_identity(
@@ -764,8 +770,10 @@ def heartbeat(
         # report's payload was rejected, so skip just that one and keep
         # going. Each refusal is counted, and a report refused
         # MAX_PUSH_REJECTIONS times is set aside rather than re-sent every
-        # minute forever. A timeout or rate limit (408/429) is about the
-        # server, not the report, so it stops the cycle like a 5xx.
+        # minute forever. Auth (401/403), a function missing while the
+        # schema reloads (404), a timeout or a rate limit (408/429) would
+        # refuse every report alike: about the server, not the report, so
+        # they stop the cycle like a 5xx and are not counted.
         import httpx
 
         flushed = 0
@@ -782,7 +790,7 @@ def heartbeat(
                 flushed += 1
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
-                if 400 <= status < 500 and status not in (408, 429):
+                if 400 <= status < 500 and status not in (401, 403, 404, 408, 429):
                     mark_push_rejected(rep["id"])
                     logging.getLogger(__name__).warning(
                         "Backfill push rejected for report %s (HTTP %d) - skipping it, "

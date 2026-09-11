@@ -371,12 +371,16 @@ class TestHeartbeat:
         assert len(attempts) == MAX_PUSH_REJECTIONS + 2
         assert count_unpushed() == 1
 
-    def test_rate_limiting_is_not_counted_as_a_rejection(self, monkeypatch):
+    @pytest.mark.parametrize("status", [401, 403, 404, 408, 429])
+    def test_refusals_that_are_not_about_the_report_are_not_counted(self, monkeypatch, status):
+        # Auth, a function missing while the schema reloads, a timeout or a
+        # rate limit would refuse every report alike; none of them may set
+        # the queue aside.
         from crashpilot.storage.store import MAX_PUSH_REJECTIONS, count_unpushed
 
         self._queue_one(monkeypatch, "crash_throttled")
         attempts: list[str] = []
-        monkeypatch.setattr("crashpilot.cloud_push.push_report", self._push_answering(429, attempts))
+        monkeypatch.setattr("crashpilot.cloud_push.push_report", self._push_answering(status, attempts))
 
         for _ in range(MAX_PUSH_REJECTIONS + 1):
             runner.invoke(app, ["heartbeat", "--quiet"])

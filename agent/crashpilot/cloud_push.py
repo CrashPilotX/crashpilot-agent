@@ -1350,9 +1350,10 @@ def _explain_http_error(exc: httpx.HTTPStatusError) -> str:
         return (
             f"HTTP {status}: the dashboard does not accept this system_id / agent_token "
             f"(from {_find_env_file()}). If the system was retired, restore it in the "
-            f"dashboard first. A machine enrolled with a join token then enrolls again "
-            f"by itself; otherwise run `sudo crashpilot configure cpilot_...` with a "
-            f"fresh connection string from the dashboard.\n  Server said: {body}"
+            f"dashboard, then run `sudo crashpilot enroll` on this machine. Otherwise a "
+            f"machine enrolled with a join token enrolls again by itself, and one set up "
+            f"with a connection string needs `sudo crashpilot configure cpilot_...` with a "
+            f"fresh one from the dashboard.\n  Server said: {body}"
         )
     return f"HTTP {status} from Supabase.\n  Server said: {body}"
 

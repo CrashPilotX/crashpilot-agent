@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -25,15 +26,16 @@ def function_source(script: str, name: str) -> str:
     return script[start:end]
 
 
-def check_non_root_gets_no_system_units(script: str) -> None:
+def check_non_root_gets_no_system_units(script: str, empty: Path) -> None:
     # A non-root run used to install system units (the prompt defaulted to
     # yes, even with no terminal) whose ExecStart ran the user's own venv as
-    # root: anyone who could write to it had root.
+    # root: anyone who could write to it had root. `empty` stands in for
+    # /etc/systemd/system, so units on the machine running this are not read.
     if os.geteuid() == 0:
         return  # the behaviour under test needs a non-root EUID
     probe = (
-        'warn() { echo "WARN: $*"; }\nINSTALL_PROBLEMS=()\n'
-        + function_source(script, "systemd_install_consented")
+        'warn() { echo "WARN: $*"; }\nINSTALL_PROBLEMS=()\nVENV_DIR=/nonexistent/venv\n'
+        + function_source(script, "systemd_install_consented").replace("/etc/systemd/system", str(empty))
         + '\nfor INSTALL_SYSTEMD in yes auto; do\n'
         + '  if systemd_install_consented; then echo "INSTALLS:$INSTALL_SYSTEMD"; fi\n'
         + 'done\necho "PROBLEMS:${#INSTALL_PROBLEMS[@]}"\n'
@@ -66,6 +68,65 @@ def check_truncated_download_runs_nothing(script: str) -> None:
         )
         if result.returncode == 0:
             raise AssertionError(f"a download cut after line {cut} would still run")
+
+
+def check_leftover_user_units_are_reported(script: str, tmp: Path) -> None:
+    # Units an earlier non-root install left behind still run that user's
+    # venv as root; a non-root run cannot remove them, so it must say so.
+    if os.geteuid() == 0:
+        return
+    units = tmp / "units"
+    units.mkdir()
+    (units / "crashpilot.service").write_text("ExecStart=/home/u/.local/share/crashpilot/venv/bin/crashpilot analyze\n")
+    probe = (
+        'warn() { echo "WARN: $*"; }\nINSTALL_PROBLEMS=()\nINSTALL_SYSTEMD=auto\n'
+        "VENV_DIR=/home/u/.local/share/crashpilot/venv\n"
+        + function_source(script, "systemd_install_consented").replace("/etc/systemd/system", str(units))
+        + '\nsystemd_install_consented; echo "PROBLEMS:${#INSTALL_PROBLEMS[@]}"\n'
+    )
+    result = subprocess.run(["bash", "-s"], input=probe, capture_output=True, text=True, check=True)
+    require(result.stdout, "PROBLEMS:1", "units running a user's venv as root must be reported")
+    require(result.stdout, "as root", "and the warning should say why")
+
+
+def check_moved_install_paths_reach_units_and_cli(script: str, tmp: Path) -> None:
+    # Outside the default locations the agent cannot find its config and
+    # data by itself: a moved install used to send the data to /root, where
+    # the sandboxed boot analysis cannot write. The services learn the paths
+    # from drop-ins (which an updater unit refresh leaves alone); the CLI
+    # wrapper, which the installer's own configure/enroll also runs, from
+    # its environment. With the defaults, nothing is set.
+    etc = tmp / "etc"
+    functions = "".join(
+        function_source(script, name) for name in ("moved_paths", "install_paths_dropin", "create_wrapper")
+    ).replace("/etc/systemd/system", str(etc))
+    probe = (
+        '_sudo() { local a=(); for x in "$@"; do case "$x" in -o|-g|root) ;; *) a+=("$x");; esac; done; "${a[@]}"; }\n'
+        f"WORK_DIR={tmp}\nVENV_DIR=/srv/cp/venv\n" + functions
+        + "\nCONFIG_DIR=/srv/cfg DATA_DIR=/srv/cp\n"
+        + "install_paths_dropin crashpilot.service; install_paths_dropin crashpilot-heartbeat.service\n"
+        + f'create_wrapper {tmp}/moved-wrapper "$(moved_paths)"\n'
+        + "CONFIG_DIR=/etc/crashpilot DATA_DIR=/opt/crashpilot\n"
+        + "install_paths_dropin crashpilot-heartbeat.service\n"
+        + f'create_wrapper {tmp}/default-wrapper "$(moved_paths)"\n'
+    )
+    subprocess.run(["bash", "-s"], input=probe, capture_output=True, text=True, check=True)
+    analysis = (etc / "crashpilot.service.d" / "10-crashpilot-paths.conf").read_text()
+    for line in ("[Service]", "Environment=CRASHPILOT_CONFIG_DIR=/srv/cfg",
+                 "Environment=CRASHPILOT_DATA_DIR=/srv/cp/data", "ReadWritePaths=-/srv/cp/data"):
+        require(analysis, line, "the boot analysis must be told where a moved install keeps its files")
+    if (etc / "crashpilot-heartbeat.service.d" / "10-crashpilot-paths.conf").exists():
+        raise AssertionError("back on the defaults, a drop-in from an earlier run must be removed")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CRASHPILOT_")}
+    show = 'exec() { echo "CFG=${CRASHPILOT_CONFIG_DIR:-} DATA=${CRASHPILOT_DATA_DIR:-} RUN=$1"; }\n'
+    for name, expected in (
+        ("moved-wrapper", "CFG=/srv/cfg DATA=/srv/cp/data RUN=/srv/cp/venv/bin/crashpilot"),
+        ("default-wrapper", "CFG= DATA= RUN=/srv/cp/venv/bin/crashpilot"),
+    ):
+        wrapper = (tmp / name).read_text().replace("#!/bin/bash\n", show, 1)
+        out = subprocess.run(["bash", "-s"], input=wrapper, capture_output=True, text=True, env=env, check=True)
+        if out.stdout.strip() != expected:
+            raise AssertionError(f"{name}: {out.stdout.strip()!r}, expected {expected!r}")
 
 
 def check_install_paths_are_validated(script: str) -> None:
@@ -216,12 +277,6 @@ def main() -> None:
     require(script, 'chmod -R a+rX "$VENV_DIR"', "only the venv should be shared with other users")
     require(script, 'install -d -m 0700 "$DATA_DIR/data"', "a fresh install must create the data dir private before any unit creates it 0755")
     require(script, 'chmod -R go-rwx "$DATA_DIR/data"', "upgrades must re-close a data dir older installers opened")
-    # Outside the default locations the agent cannot find its config and
-    # data dirs by itself; a drop-in survives the updater refreshing units.
-    require(script, "Environment=CRASHPILOT_DATA_DIR=", "a moved install must tell the units where its data is")
-    require(script, "Environment=CRASHPILOT_CONFIG_DIR=", "a moved config must be passed to the units")
-    require(script, "ReadWritePaths=", "the sandboxed boot analysis must be able to write a moved data dir")
-    require(script, '"/etc/systemd/system/$1.d"', "paths go in drop-ins, which an updater refresh leaves alone")
     if "bootstrap.pypa.io" in script:
         raise AssertionError("never pipe an unverified download from bootstrap.pypa.io into Python as root")
     require(script, "--proto '=https' --tlsv1.2", "bundle downloads must refuse plain http and old TLS")
@@ -234,9 +289,14 @@ def main() -> None:
     if "read -rp \"Install systemd" in script:
         raise AssertionError("service installs must never prompt from stdin, which is the script under curl | bash")
 
-    check_non_root_gets_no_system_units(script)
+    with tempfile.TemporaryDirectory() as tmp:
+        check_non_root_gets_no_system_units(script, Path(tmp))
     check_truncated_download_runs_nothing(script)
     check_install_paths_are_validated(script)
+    with tempfile.TemporaryDirectory() as tmp:
+        check_leftover_user_units_are_reported(script, Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp:
+        check_moved_install_paths_reach_units_and_cli(script, Path(tmp))
 
     unsupported_managers = ["dnf", "pacman", "zypper", "apk", "xbps"]
     active_installs = [

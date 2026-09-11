@@ -7,7 +7,8 @@ background_agent_loop() {
   # A stop ends the loop between commands. One that arrives during a
   # heartbeat waits for it (bash runs the trap once the command returns), so
   # no heartbeat is still in flight when the node signs off.
-  trap 'kill "${nap:-}" 2>/dev/null; exit 0' TERM
+  nap=""
+  trap '[[ -n "$nap" ]] && kill "$nap" 2>/dev/null; exit 0' TERM
   while true; do
     crashpilot snapshot --quiet || true
     crashpilot heartbeat --quiet || true
@@ -15,6 +16,8 @@ background_agent_loop() {
     sleep "$interval" &
     nap=$!
     wait "$nap" || true
+    # Reaped: with hostPID its number can soon belong to any host process.
+    nap=""
   done
 }
 

@@ -315,6 +315,9 @@ class TestPushHeartbeat:
         assert str(env) in message
         assert "/etc/crashpilot/.env" not in message
         assert "restore" in message.lower() and "retired" in message
+        # A node retired on purpose does not re-enroll by itself (see
+        # TestRetiredNode); other join-token nodes do.
+        assert "then run `sudo crashpilot enroll`" in message
         assert "join token" in message and "enrolls again by itself" in message
 
     async def test_rejected_anon_key_names_the_env_file_in_use(self, monkeypatch, tmp_path):

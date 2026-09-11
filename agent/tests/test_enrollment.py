@@ -395,6 +395,32 @@ class TestCopiedIdentity:
         # After enrolling as itself, the same boot must not keep "moving".
         assert copied_identity("machine:" + "b" * 32, "", state, boot_id="boot-1") == (None, True)
 
+    def test_an_unanswered_check_is_tried_again_later_in_the_boot(self, tmp_path, monkeypatch):
+        # A metadata service slow at boot must not leave a copy reporting as
+        # the build machine until the next reboot.
+        answers = iter([None, "i-0copy000000000001"])
+        probes: list[int] = []
+        monkeypatch.setattr(
+            enrollment, "_aws_instance_id", lambda client: probes.append(1) or next(answers),
+        )
+        state = tmp_path / "identity-check"
+        pinned = "aws:i-0build00000000001"
+
+        assert copied_identity(pinned, "", state, boot_id="b", now=1000.0) == (None, True)
+        # Not every minute, though.
+        assert copied_identity(pinned, "", state, boot_id="b", now=1060.0) == (None, False)
+        assert len(probes) == 1
+        later = 1000.0 + enrollment.REENROLL_COOLDOWN_SECONDS + 1
+        assert copied_identity(pinned, "", state, boot_id="b", now=later) == ("aws:i-0copy000000000001", True)
+
+    def test_the_answer_is_what_it_enrolls_under(self, tmp_path, monkeypatch):
+        # Detecting again could miss the metadata service this time and fall
+        # through to a machine ID every copy of the image shares.
+        monkeypatch.setattr(enrollment, "_aws_instance_id", lambda client: "i-0copy000000000001")
+        monkeypatch.setattr(enrollment, "resolve_identity", lambda *a, **k: pytest.fail("detected again"))
+        moved, _ = copied_identity("aws:i-0build00000000001", "", tmp_path / "s", boot_id="b")
+        assert moved == "aws:i-0copy000000000001"
+
     def test_no_boot_id_means_no_check(self, tmp_path, monkeypatch):
         monkeypatch.setattr(enrollment, "_machine_id", lambda: pytest.fail("not probed"))
         assert copied_identity("machine:" + "a" * 32, "", tmp_path / "s", boot_id=None) == (None, False)

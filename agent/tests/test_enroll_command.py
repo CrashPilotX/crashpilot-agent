@@ -398,6 +398,49 @@ class TestCopiedImage:
         assert len(fake_enroll) == 1
         assert heartbeats == ["tok-1", "tok-1", "tok-1"]
 
+    def test_a_copy_whose_own_system_was_retired_never_borrows_the_build_credentials(
+        self, monkeypatch, tmp_path, heartbeats,
+    ):
+        # Found in review: the retired marker skipped the copy check, the
+        # heartbeat then went out with the build machine's credentials,
+        # succeeded, and cleared the marker, round and round.
+        self._enrolled_build_machine(tmp_path, monkeypatch)
+        attempts = _retire_on_enroll(monkeypatch)
+        import crashpilot.config as cfg_mod
+
+        first = runner.invoke(app, ["heartbeat", "--quiet"])
+        cfg_mod._settings = None
+        (tmp_path / "data" / "reenroll-attempt").write_text("0")
+        second = runner.invoke(app, ["heartbeat", "--quiet"])
+
+        assert first.exit_code == 1 and second.exit_code == 1
+        assert heartbeats == []
+        assert len(attempts) == 1
+        assert (tmp_path / "data" / "retired").exists()
+
+    def test_re_enrolling_checks_a_detected_identity_first(
+        self, monkeypatch, tmp_path, fake_enroll,
+    ):
+        # Credentials rejected (or `enroll --force`) on a copy the boot check
+        # missed: re-enrolling under the pinned build identity took over the
+        # build machine's system.
+        self._enrolled_build_machine(tmp_path, monkeypatch)
+        import crashpilot.config as cfg_mod
+        import crashpilot.main as main_mod
+
+        main_mod._enroll_and_store(cfg_mod.get_settings().enroll_token, "", persist_token=False)
+        # A metadata service that does not answer is not a different machine.
+        monkeypatch.setattr("crashpilot.enrollment._aws_instance_id", lambda client: None)
+        (tmp_path / ".env").write_text(
+            (tmp_path / ".env").read_text().replace("aws:i-0copy000000000001", "aws:i-0build00000000001")
+        )
+        cfg_mod._settings = None
+        main_mod._enroll_and_store(cfg_mod.get_settings().enroll_token, "", persist_token=False)
+
+        assert [call["external_id"] for call in fake_enroll] == [
+            "aws:i-0copy000000000001", "aws:i-0build00000000001",
+        ]
+
     def test_an_identity_given_explicitly_is_left_alone(
         self, monkeypatch, tmp_path, fake_enroll, heartbeats,
     ):

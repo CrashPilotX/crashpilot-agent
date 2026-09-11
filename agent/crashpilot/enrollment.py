@@ -211,8 +211,16 @@ def _identity_now(pinned: str, node_name: str) -> str | None:
     return f"{source}:{found}" if found else None
 
 
+def identity_moved(pinned: str, node_name: str) -> str | None:
+    """This machine's own identity, when the source the detected ``pinned``
+    one came from now names a different machine; None when it names the
+    same one or cannot answer."""
+    current = _identity_now(pinned, node_name)
+    return current if current is not None and current != pinned else None
+
+
 def copied_identity(
-    pinned: str, node_name: str, state: Path, boot_id: str | None,
+    pinned: str, node_name: str, state: Path, boot_id: str | None, now: float | None = None,
 ) -> tuple[str | None, bool]:
     """The identity to enroll under when this is not the machine that enrolled.
 
@@ -220,29 +228,34 @@ def copied_identity(
     or the build machine's own heartbeat) carries that machine's pinned
     identity and credentials, so every copy reported as the build machine.
     Worked out once per boot and remembered in ``state`` (keyed on the boot
-    and the pinned identity), so metadata probes do not run every minute.
+    and the pinned identity), so metadata probes do not run every minute; a
+    source that did not answer is asked again after the enrollment cooldown,
+    not left unchecked until the next reboot.
     Returns (identity or None, whether it was worked out afresh).
     """
     if not boot_id:
         return None, False
+    now = time.time() if now is None else now
     try:
         cached = json.loads(state.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         cached = None
     if isinstance(cached, dict) and cached.get("boot_id") == boot_id and cached.get("pinned") == pinned:
-        return cached.get("moved") or None, False
+        age = now - float(cached.get("checked_at") or 0)
+        if cached.get("answered", True) or 0 <= age < REENROLL_COOLDOWN_SECONDS:
+            return cached.get("moved") or None, False
 
-    moved = None
-    now = _identity_now(pinned, node_name)
-    if now is not None and now != pinned:
-        moved = resolve_identity("", node_name)
-        if moved == pinned:
-            moved = None
+    current = _identity_now(pinned, node_name)
+    # Enroll under the answer just given: detecting afresh could miss the
+    # metadata service this time and fall through to a machine ID that every
+    # copy of the image shares.
+    moved = current if current is not None and current != pinned else None
     try:
         state.parent.mkdir(parents=True, exist_ok=True)
-        state.write_text(
-            json.dumps({"boot_id": boot_id, "pinned": pinned, "moved": moved}), encoding="utf-8",
-        )
+        state.write_text(json.dumps({
+            "boot_id": boot_id, "pinned": pinned, "moved": moved,
+            "answered": current is not None, "checked_at": now,
+        }), encoding="utf-8")
     except OSError:
         log.debug("Could not record the identity check at %s", state)
     return moved, True
