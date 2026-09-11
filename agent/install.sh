@@ -13,14 +13,35 @@ if [[ -n "$_src" && "$_src" != "bash" && -f "$_src" ]]; then
   REPO_DIR="$(cd "$(dirname "$_src")/.." && pwd)"
 fi
 
+# Every temporary file this script writes lives in one private directory
+# (mktemp -d is mode 0700) that is removed however the script exits. Fixed
+# names under /tmp let a local user pre-create or race the files that are
+# later copied into /etc/systemd/system as root.
+WORK_DIR="$(mktemp -d)" || { echo "[err ]  could not create a temporary directory"; exit 1; }
+cleanup_work_dir() { rm -rf "$WORK_DIR"; }
+trap cleanup_work_dir EXIT
+
 if [[ -z "${REPO_DIR:-}" || ! -f "$REPO_DIR/agent/pyproject.toml" ]]; then
   # curl-pipe install: fetch the agent bundle the website publishes, which is
   # built from a pinned commit of this repository.
-  BUNDLE_PARENT="$(mktemp -d)"
+  BUNDLE_PARENT="$WORK_DIR/bundle"
+  mkdir -p "$BUNDLE_PARENT"
   CLONE_DIR="$BUNDLE_PARENT/CrashPilot"
   BUNDLE_URL="${CRASHPILOT_BUNDLE_URL:-https://crashpilotx.com/crashpilot-agent.tar.gz}"
   BUNDLE_SHA_URL="${CRASHPILOT_BUNDLE_SHA_URL:-${BUNDLE_URL}.sha256}"
+  # The website's publish step writes the bundle's digest into this line, so
+  # the installer and the bundle it installs are checked against each other
+  # rather than only against a .sha256 fetched from the same place. Left as
+  # the placeholder (running from a checkout, or a mirror), the published
+  # .sha256 is used instead.
+  EXPECTED_BUNDLE_SHA256="${CRASHPILOT_BUNDLE_SHA256:-__CRASHPILOT_BUNDLE_SHA256__}"
   echo "[info]  Standalone installer detected: downloading agent bundle..."
+
+  case "$BUNDLE_URL$BUNDLE_SHA_URL" in
+    *http://*)
+      echo "[err ]  the agent bundle must be fetched over https:// (got $BUNDLE_URL)"
+      exit 1 ;;
+  esac
 
   if ! command -v curl &>/dev/null || ! command -v tar &>/dev/null; then
     echo "[err ]  curl and tar are required for curl-pipe installs. Install them with:"
@@ -40,10 +61,15 @@ if [[ -z "${REPO_DIR:-}" || ! -f "$REPO_DIR/agent/pyproject.toml" ]]; then
   # Download to a file rather than piping into tar: a stream cannot be checked
   # until it has already been extracted.
   BUNDLE_FILE="$BUNDLE_PARENT/crashpilot-agent.tar.gz"
-  curl -fsSL "$BUNDLE_URL" -o "$BUNDLE_FILE" \
+  CURL_SAFE=(curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 300)
+  "${CURL_SAFE[@]}" "$BUNDLE_URL" -o "$BUNDLE_FILE" \
     || { echo "[err ]  agent bundle download failed: $BUNDLE_URL"; exit 1; }
-  curl -fsSL "$BUNDLE_SHA_URL" -o "${BUNDLE_FILE}.sha256" \
-    || { echo "[err ]  agent bundle checksum download failed: $BUNDLE_SHA_URL"; exit 1; }
+  if [[ "$EXPECTED_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    printf '%s  crashpilot-agent.tar.gz\n' "$EXPECTED_BUNDLE_SHA256" > "${BUNDLE_FILE}.sha256"
+  else
+    "${CURL_SAFE[@]}" "$BUNDLE_SHA_URL" -o "${BUNDLE_FILE}.sha256" \
+      || { echo "[err ]  agent bundle checksum download failed: $BUNDLE_SHA_URL"; exit 1; }
+  fi
 
   # The published .sha256 is in sha256sum's own format and names the tarball,
   # so check it from the directory holding both files.
@@ -67,15 +93,20 @@ if [[ -z "${REPO_DIR:-}" || ! -f "$REPO_DIR/agent/pyproject.toml" ]]; then
 fi
 
 INSTALL_SYSTEMD="${INSTALL_SYSTEMD:-auto}"  # auto | yes | no
+INSTALL_USER="${SUDO_USER:-$(id -un)}"
 
 # When running as root (sudo), install to system-wide paths so any user can
 # invoke `crashpilot`.  When running as a normal user, install to $HOME.
+# CRASHPILOT_INSTALL_DIR moves the install. It used to read
+# CRASHPILOT_DATA_DIR, which is also the agent's own data-directory setting,
+# so exporting it for the agent and re-running this script silently moved
+# the venv and rewrote every unit to point at the new path.
 if [[ $EUID -eq 0 ]]; then
   CONFIG_DIR="${CRASHPILOT_CONFIG_DIR:-/etc/crashpilot}"
-  DATA_DIR="${CRASHPILOT_DATA_DIR:-/opt/crashpilot}"
+  DATA_DIR="${CRASHPILOT_INSTALL_DIR:-/opt/crashpilot}"
 else
   CONFIG_DIR="${CRASHPILOT_CONFIG_DIR:-$HOME/.config/crashpilot}"
-  DATA_DIR="${CRASHPILOT_DATA_DIR:-$HOME/.local/share/crashpilot}"
+  DATA_DIR="${CRASHPILOT_INSTALL_DIR:-$HOME/.local/share/crashpilot}"
 fi
 VENV_DIR="$DATA_DIR/venv"
 
@@ -217,13 +248,36 @@ _sudo() {
   fi
 }
 
+# Ask a yes/no question on the controlling terminal. Under `curl | bash`
+# stdin is the script itself, so a plain `read` consumed the next line of
+# this file as the answer. With no terminal at all, take the default.
+ask_yes_no() {
+  local prompt="$1" default="$2" reply=""
+  if [[ -t 0 ]]; then
+    read -rp "$prompt" reply || reply=""
+  elif [[ -r /dev/tty ]] && { : < /dev/tty; } 2>/dev/null; then
+    read -rp "$prompt" reply < /dev/tty || reply=""
+  else
+    reply="$default"
+  fi
+  [[ -z "$reply" ]] && reply="$default"
+  [[ "$reply" =~ ^[Yy] ]]
+}
+
 install_python() {
-  _sudo apt-get install -y python3 python3-pip python3-venv
+  # A fresh minimal image has empty package lists, so install alone fails.
+  _sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+    || warn "apt-get update failed; trying to install from the existing package lists"
+  _sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pip python3-venv
 }
 
 if ! command -v python3 &>/dev/null; then
   warn "Python 3 not found: installing..."
   install_python
+  if ! command -v python3 &>/dev/null; then
+    err "Python 3 could not be installed. Install python3 (3.10 or newer) and run this again."
+    exit 1
+  fi
 fi
 
 PYTHON_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
@@ -232,8 +286,13 @@ if python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)"; th
 else
   warn "Python $PYTHON_VER found but 3.10+ recommended. Attempting upgrade..."
   install_python
-  PYTHON_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-  ok "Python $PYTHON_VER"
+  PYTHON_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "unknown")
+  if python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" 2>/dev/null; then
+    ok "Python $PYTHON_VER"
+  else
+    err "Python 3.10 or newer is required (found $PYTHON_VER)."
+    exit 1
+  fi
 fi
 
 # ── Optional system tools ─────────────────────────────────────────────────────
@@ -349,9 +408,9 @@ if command -v journalctl &>/dev/null; then
   elif [[ $EUID -eq 0 ]]; then
     ok "journalctl readable (root)"
   else
-    warn "journalctl restricted: adding $USER to systemd-journal group"
+    warn "journalctl restricted: adding $INSTALL_USER to systemd-journal group"
     if getent group systemd-journal &>/dev/null; then
-      sudo usermod -aG systemd-journal "$USER" && ok "Added to systemd-journal (re-login required)"
+      _sudo usermod -aG systemd-journal "$INSTALL_USER" && ok "Added to systemd-journal (re-login required)"
     fi
   fi
 fi
@@ -397,9 +456,6 @@ CRASHPILOT_ANALYSIS_TIMEOUT=120
 CRASHPILOT_BANDWIDTH_SPEEDTEST_ENABLED=true
 CRASHPILOT_BANDWIDTH_SPEEDTEST_INTERVAL_SECONDS=21600
 CRASHPILOT_BANDWIDTH_SPEEDTEST_TIMEOUT_SECONDS=90
-
-# Data storage
-# CRASHPILOT_DATA_DIR=/var/lib/crashpilot  # uncomment for system-wide install
 ENVEOF
   # Private because push-mode credentials are stored here after configure.
   # User installs: 600 (private: only the owning user needs it)
@@ -450,9 +506,15 @@ fi
 # Bootstrap pip: Ubuntu 24.04 venvs sometimes ship without it
 if [[ ! -x "$VENV_DIR/bin/pip" ]]; then
   info "pip missing from venv: bootstrapping with ensurepip..."
-  "$VENV_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null || \
-  curl -sSf https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR/bin/python3" || \
-  { err "Cannot bootstrap pip: install python3-pip manually"; exit 1; }
+  if ! "$VENV_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null; then
+    # No unverified get-pip.py piped into Python as root: use the distro's
+    # own packages, then rebuild the venv so it picks them up.
+    _try_install_pkg python3-pip || true
+    _try_install_pkg python3-venv || true
+    rm -rf "$VENV_DIR"
+    python3 -m venv "$VENV_DIR" && "$VENV_DIR/bin/python3" -m ensurepip --upgrade 2>/dev/null \
+      || { err "Cannot bootstrap pip: install python3-pip and python3-venv, then run this again"; exit 1; }
+  fi
 fi
 
 info "Upgrading pip..."
@@ -490,8 +552,15 @@ WRAPPER
 if [[ $EUID -eq 0 ]]; then
   # System-wide install: /usr/local/bin is readable by all users
   create_wrapper /usr/local/bin/crashpilot
-  # Make the venv readable by all users (it lives in /opt/crashpilot)
-  chmod -R a+rX "$DATA_DIR"
+  # Other users need the venv to run the CLI, so share exactly that. The data
+  # directory holds the local API token (agent.token) and the crash database;
+  # the old recursive chmod over all of $DATA_DIR made both world-readable on
+  # every install and upgrade. Re-close anything a previous run opened.
+  chmod a+rX "$DATA_DIR"
+  chmod -R a+rX "$VENV_DIR"
+  if [[ -d "$DATA_DIR/data" ]]; then
+    chmod -R go-rwx "$DATA_DIR/data"
+  fi
   ok "Installed wrapper: /usr/local/bin/crashpilot"
 else
   LOCAL_BIN="$HOME/.local/bin"
@@ -506,51 +575,59 @@ fi
 # ── Systemd service installation ──────────────────────────────────────────────
 section "Setting up service"
 
+# Problems worth failing the run over are collected here and reported at the
+# end, so automation driving this script gets a non-zero exit instead of
+# "Installation complete!" over a half-installed agent.
+INSTALL_PROBLEMS=()
+
+# Render one unit into the private work dir and install it root-owned 0644.
+# Writing straight into a fixed /tmp name first let a local user substitute
+# their own unit file between the render and the copy.
+install_unit() {
+  local src="$1" dest_name="$2"
+  local rendered="$WORK_DIR/$dest_name"
+  sed "s|__CRASHPILOT_BIN__|$VENV_DIR/bin/crashpilot|g" "$src" > "$rendered" || return 1
+  _sudo install -m 0644 -o root -g root "$rendered" "/etc/systemd/system/$dest_name"
+}
+
 install_systemd_services() {
   local service_src="$REPO_DIR/systemd"
-  local svc_dir="/etc/systemd/system"
+  local unit timer failed=0
 
-  # Replace venv path placeholder in service files
-  sed "s|__CRASHPILOT_BIN__|$VENV_DIR/bin/crashpilot|g" \
-    "$service_src/crashpilot.service" > /tmp/crashpilot.service
-  sed "s|__CRASHPILOT_BIN__|$VENV_DIR/bin/crashpilot|g" \
-    "$service_src/crashpilot-api.service" > /tmp/crashpilot-api.service
-
-  sudo cp /tmp/crashpilot.service "$svc_dir/crashpilot.service"
-  sudo cp /tmp/crashpilot-api.service "$svc_dir/crashpilot-api@.service"
-  sudo systemctl daemon-reload
-  sudo systemctl enable crashpilot.service
-  sudo systemctl enable --now "crashpilot-api@root" 2>/dev/null || \
-    sudo systemctl start "crashpilot-api@root" 2>/dev/null || true
-
-  # Install heartbeat timer (starts automatically when push mode is configured)
-  if [[ -f "$service_src/crashpilot-heartbeat.service" && -f "$service_src/crashpilot-heartbeat.timer" ]]; then
-    sed "s|__CRASHPILOT_BIN__|$VENV_DIR/bin/crashpilot|g" \
-      "$service_src/crashpilot-heartbeat.service" > /tmp/crashpilot-heartbeat.service
-    sudo cp /tmp/crashpilot-heartbeat.service "$svc_dir/crashpilot-heartbeat.service"
-    sudo cp "$service_src/crashpilot-heartbeat.timer" "$svc_dir/crashpilot-heartbeat.timer"
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now crashpilot-heartbeat.timer 2>/dev/null || true
+  if ! install_unit "$service_src/crashpilot.service" crashpilot.service \
+     || ! install_unit "$service_src/crashpilot-api.service" crashpilot-api@.service; then
+    INSTALL_PROBLEMS+=("could not install the core systemd units")
+    return 1
   fi
 
-  # Install the verified daily update check.
-  if [[ -f "$service_src/crashpilot-update.service" && -f "$service_src/crashpilot-update.timer" ]]; then
-    sed "s|__CRASHPILOT_BIN__|$VENV_DIR/bin/crashpilot|g" \
-      "$service_src/crashpilot-update.service" > /tmp/crashpilot-update.service
-    sudo cp /tmp/crashpilot-update.service "$svc_dir/crashpilot-update.service"
-    sudo cp "$service_src/crashpilot-update.timer" "$svc_dir/crashpilot-update.timer"
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now crashpilot-update.timer 2>/dev/null || true
-  fi
+  # Heartbeat, the verified daily update check, and the rolling flight
+  # recorder. Each ships as a service plus a timer; install whichever this
+  # bundle has.
+  local timers=(crashpilot-heartbeat.timer crashpilot-update.timer crashpilot-snapshot.timer)
+  for timer in "${timers[@]}"; do
+    unit="${timer%.timer}.service"
+    if [[ -f "$service_src/$unit" && -f "$service_src/$timer" ]]; then
+      install_unit "$service_src/$unit" "$unit" || failed=1
+      install_unit "$service_src/$timer" "$timer" || failed=1
+    fi
+  done
 
-  # Install the rolling flight recorder.
-  if [[ -f "$service_src/crashpilot-snapshot.service" && -f "$service_src/crashpilot-snapshot.timer" ]]; then
-    sed "s|__CRASHPILOT_BIN__|$VENV_DIR/bin/crashpilot|g" \
-      "$service_src/crashpilot-snapshot.service" > /tmp/crashpilot-snapshot.service
-    sudo cp /tmp/crashpilot-snapshot.service "$svc_dir/crashpilot-snapshot.service"
-    sudo cp "$service_src/crashpilot-snapshot.timer" "$svc_dir/crashpilot-snapshot.timer"
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now crashpilot-snapshot.timer 2>/dev/null || true
+  _sudo systemctl daemon-reload || failed=1
+  _sudo systemctl enable crashpilot.service >/dev/null 2>&1 || failed=1
+  _sudo systemctl enable --now "crashpilot-api@root" >/dev/null 2>&1 || failed=1
+  # An upgrade replaced the code under a running API server; enable --now is a
+  # no-op for an active unit, so restart it onto the new version.
+  _sudo systemctl try-restart "crashpilot-api@root" >/dev/null 2>&1 || true
+  for timer in "${timers[@]}"; do
+    if [[ -f "/etc/systemd/system/$timer" ]]; then
+      _sudo systemctl enable --now "$timer" >/dev/null 2>&1 || failed=1
+    fi
+  done
+
+  if [[ $failed -ne 0 ]]; then
+    INSTALL_PROBLEMS+=("some systemd units could not be installed or enabled; check: systemctl status 'crashpilot*'")
+    warn "Some systemd units could not be installed or enabled"
+    return 1
   fi
 
   ok "systemd services installed and API server started"
@@ -562,17 +639,16 @@ install_systemd_services() {
 
 install_openrc_services() {
   # OpenRC is unreachable while support is Ubuntu-only.
-  cat > /tmp/crashpilot-rc << RCEOF
+  cat > "$WORK_DIR/crashpilot-rc" << RCEOF
 #!/sbin/openrc-run
 description="CrashPilot crash analysis"
 command="$VENV_DIR/bin/crashpilot"
 command_args="analyze"
-command_user="${SUDO_USER:-$USER}"
+command_user="$INSTALL_USER"
 depend() { need localmount logger; }
 RCEOF
-  sudo cp /tmp/crashpilot-rc /etc/init.d/crashpilot
-  sudo chmod +x /etc/init.d/crashpilot
-  sudo rc-update add crashpilot default
+  _sudo install -m 0755 -o root -g root "$WORK_DIR/crashpilot-rc" /etc/init.d/crashpilot
+  _sudo rc-update add crashpilot default
   ok "OpenRC service installed"
 }
 
@@ -588,18 +664,24 @@ RUNIT
   ok "runit service installed at $sv_dir"
 }
 
-if [[ $IS_WSL -eq 1 && "$INIT_SYS" == "systemd" ]]; then
-  if [[ $EUID -eq 0 ]]; then
+# Whether to install systemd units without asking: INSTALL_SYSTEMD=yes, or a
+# root install (the dashboard one-liner runs under sudo). INSTALL_SYSTEMD=no
+# is checked first so it holds on WSL as well.
+systemd_install_consented() {
+  [[ "$INSTALL_SYSTEMD" == "yes" || $EUID -eq 0 ]] && return 0
+  ask_yes_no "$1" "y"
+}
+
+if [[ "$INSTALL_SYSTEMD" == "no" ]]; then
+  info "Systemd install skipped (INSTALL_SYSTEMD=no)"
+
+elif [[ $IS_WSL -eq 1 && "$INIT_SYS" == "systemd" ]]; then
+  if systemd_install_consented "Install systemd services for WSL (requires sudo)? [Y/n] "; then
     info "WSL with systemd detected: installing heartbeat timer"
     install_systemd_services
   else
-    read -rp "Install systemd services for WSL (requires sudo)? [Y/n] " ans
-    if [[ ! "$ans" =~ ^[Nn]$ ]]; then
-      install_systemd_services
-    else
-      info "Skipping systemd services"
-      echo -e "  ${DIM}Run manually after connecting: crashpilot heartbeat${RESET}"
-    fi
+    info "Skipping systemd services"
+    echo -e "  ${DIM}Run manually after connecting: crashpilot heartbeat${RESET}"
   fi
 
 elif [[ $IS_WSL -eq 1 ]]; then
@@ -607,19 +689,11 @@ elif [[ $IS_WSL -eq 1 ]]; then
   echo -e "  ${DIM}Run manually after connecting: crashpilot heartbeat${RESET}"
   echo -e "  ${DIM}Or enable systemd in WSL2 for automatic heartbeat timers.${RESET}"
 
-elif [[ "$INSTALL_SYSTEMD" == "no" ]]; then
-  info "Systemd install skipped (INSTALL_SYSTEMD=no)"
-
 elif [[ "$INIT_SYS" == "systemd" ]]; then
-  if [[ $EUID -eq 0 ]]; then
+  if systemd_install_consented "Install systemd services (requires sudo)? [Y/n] "; then
     install_systemd_services
   else
-    read -rp "Install systemd services (requires sudo)? [Y/n] " ans
-    if [[ ! "$ans" =~ ^[Nn]$ ]]; then
-      install_systemd_services
-    else
-      info "Skipping systemd services"
-    fi
+    info "Skipping systemd services"
   fi
 
 elif [[ "$INIT_SYS" == "openrc" ]]; then
@@ -658,6 +732,7 @@ if [[ -n "$CRASHPILOT_BIN" ]] && "$CRASHPILOT_BIN" --help &>/dev/null; then
 else
   err "CLI not found in PATH"
   info "Use: $VENV_DIR/bin/crashpilot"
+  INSTALL_PROBLEMS+=("the crashpilot CLI did not run after installation")
 fi
 
 # ── Auto-connect to the dashboard (push mode) ──────────────────────────────────
@@ -675,11 +750,21 @@ if [[ -n "$CONNECT_STRING" ]]; then
   else
     err "Could not connect with that connection string."
     err "Get a fresh one from the dashboard → Systems → Add system."
+    INSTALL_PROBLEMS+=("connecting to the dashboard failed")
   fi
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
+if [[ ${#INSTALL_PROBLEMS[@]} -gt 0 ]]; then
+  echo -e "${RED}${BOLD}✗ Installation finished with problems:${RESET}"
+  for problem in "${INSTALL_PROBLEMS[@]}"; do
+    echo -e "  ${RED}-${RESET} $problem"
+  done
+  echo ""
+  echo -e "  ${DIM}Run ${RESET}${CYAN}sudo crashpilot doctor${RESET}${DIM} for details.${RESET}"
+  exit 1
+fi
 echo -e "${GREEN}${BOLD}✓ Installation complete!${RESET}"
 echo ""
 echo -e "  Platform: ${BOLD}${DISTRO} ${DISTRO_VER}${RESET} | Init: ${BOLD}${INIT_SYS}${RESET}"
@@ -714,7 +799,3 @@ echo ""
 echo -e "  ${DIM}Something not working? Run ${RESET}${CYAN}sudo crashpilot doctor${RESET}${DIM}: it diagnoses config, connection, and the timer.${RESET}"
 echo ""
 
-# Clean up the temp clone directory if we created one during curl-pipe install
-if [[ -n "${CLONE_DIR:-}" && -d "${CLONE_DIR:-}" ]]; then
-  rm -rf "$CLONE_DIR"
-fi

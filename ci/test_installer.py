@@ -90,6 +90,49 @@ def main() -> None:
     require(update_service, "update --quiet", "update service should call the restricted updater command")
     require(update_timer, "Persistent=true", "missed update checks should run after the machine returns")
 
+    # ── Hardening: each of these was a real hole in an earlier version ────────
+    if "/tmp/crashpilot" in script:
+        raise AssertionError(
+            "units must be rendered in the private mktemp work dir, never at a fixed /tmp path "
+            "a local user can pre-create before it is copied into /etc/systemd/system as root"
+        )
+    require(script, 'WORK_DIR="$(mktemp -d)"', "temporary files need one private directory")
+    require(script, "trap cleanup_work_dir EXIT", "the work dir must be removed however the script exits")
+    require(script, 'install -m 0644 -o root -g root', "units must be installed root-owned and not writable by others")
+    if 'chmod -R a+rX "$DATA_DIR"' in script:
+        raise AssertionError(
+            "a recursive chmod over the install dir makes the API token and crash DB world-readable"
+        )
+    require(script, 'chmod -R a+rX "$VENV_DIR"', "only the venv should be shared with other users")
+    require(script, 'chmod -R go-rwx "$DATA_DIR/data"', "upgrades must re-close a data dir older installers opened")
+    if "bootstrap.pypa.io" in script:
+        raise AssertionError("never pipe an unverified download from bootstrap.pypa.io into Python as root")
+    require(script, "--proto '=https' --tlsv1.2", "bundle downloads must refuse plain http and old TLS")
+    require(script, "__CRASHPILOT_BUNDLE_SHA256__", "the publish step pins the bundle digest into the installer")
+    require(script, "apt-get update", "package lists must be refreshed before installing Python")
+    require(script, "CRASHPILOT_INSTALL_DIR", "the install location must not reuse the agent's CRASHPILOT_DATA_DIR")
+    if "CRASHPILOT_DATA_DIR=/var/lib/crashpilot" in script:
+        raise AssertionError("the .env template must not suggest a data dir the service cannot write")
+    require(script, 'exit 1\nfi\necho -e "${GREEN}${BOLD}✓ Installation complete!', "a run with problems must exit non-zero")
+    if "read -rp \"Install systemd" in script:
+        raise AssertionError("service prompts must go through ask_yes_no, which reads the terminal, not stdin")
+
+    # Behaviour, not just text: with the script itself on stdin (curl | bash)
+    # and no terminal, the prompt must take its default instead of reading
+    # the next line of the piped script as the answer.
+    start = script.index("ask_yes_no() {")
+    end = script.index("\n}\n", start) + 3
+    probe = (
+        script[start:end]
+        + '\nif ask_yes_no "Install? [Y/n] " "y"; then echo DEFAULT_YES; else echo ANSWERED_NO; fi\n'
+        + "echo NEXT_LINE_RAN\n"
+    )
+    piped = subprocess.run(
+        ["setsid", "bash", "-s"], input=probe, capture_output=True, text=True, check=True,
+    )
+    if "DEFAULT_YES" not in piped.stdout or "NEXT_LINE_RAN" not in piped.stdout:
+        raise AssertionError(f"ask_yes_no consumed the piped script: {piped.stdout!r} {piped.stderr!r}")
+
     unsupported_managers = ["dnf", "pacman", "zypper", "apk", "xbps"]
     active_installs = [
         manager for manager in unsupported_managers
