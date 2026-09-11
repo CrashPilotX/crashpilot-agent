@@ -1,6 +1,6 @@
 [Unit]
 Description=CrashPilot API Server
-Documentation=https://kdigitalsystems.github.io/CrashPilot
+Documentation=https://crashpilotx.com/docs
 After=network.target crashpilot.service
 Wants=network.target
 

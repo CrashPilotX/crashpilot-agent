@@ -21,6 +21,28 @@ CHECKSUM_URL = f"{BUNDLE_URL}.sha256"
 _SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
 SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
 
+_TIMERS = [
+    "crashpilot-heartbeat.timer",
+    "crashpilot-update.timer",
+    "crashpilot-snapshot.timer",
+]
+_SIGNOFF_UNIT = "crashpilot-signoff.service"
+# Every unit an update keeps in step with the bundle, installing any that are
+# missing. crashpilot.service and the API server template are left to
+# install.sh.
+REFRESHED_UNITS = [
+    "crashpilot-heartbeat.service",
+    "crashpilot-heartbeat.timer",
+    "crashpilot-update.service",
+    "crashpilot-update.timer",
+    "crashpilot-snapshot.service",
+    "crashpilot-snapshot.timer",
+    _SIGNOFF_UNIT,
+]
+# The local API server is long-running, so it serves whatever code it started
+# with until it restarts.
+_API_UNITS = "crashpilot-api@*.service"
+
 
 def _download(url: str) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "CrashPilotX updater"})
@@ -66,28 +88,46 @@ def _install_systemd_unit_template(src: Path, dest: Path) -> None:
     dest.write_text(rendered, encoding="utf-8")
 
 
+def _systemctl(*args: str) -> None:
+    subprocess.run(["systemctl", *args], check=False, capture_output=True, text=True, timeout=30)
+
+
+def _units_missing() -> bool:
+    """Whether this systemd install lacks a unit an update should have added.
+
+    The running updater refreshes units with its own list, so the update that
+    installs a version with a longer list still refreshes with the old one.
+    Checking on every run fills the gap within an hour instead of waiting for
+    the next release. Hosts installed without systemd units are left alone.
+    """
+    unit_dir = SYSTEMD_UNIT_DIR
+    if not unit_dir.is_dir() or not os.access(unit_dir, os.W_OK):
+        return False
+    if not (unit_dir / "crashpilot-heartbeat.service").is_file():
+        return False
+    return any(not (unit_dir / name).is_file() for name in REFRESHED_UNITS)
+
+
 def _refresh_systemd_units(bundle_root: Path) -> dict[str, Any]:
-    """Best-effort refresh of installed systemd units from the verified bundle."""
+    """Best-effort refresh of installed systemd units from the verified bundle.
+
+    Also restarts a running API server so it picks up the installed code.
+    """
     systemd_dir = bundle_root / "systemd"
     unit_dir = SYSTEMD_UNIT_DIR
-    unit_names = [
-        "crashpilot-heartbeat.service",
-        "crashpilot-heartbeat.timer",
-        "crashpilot-update.service",
-        "crashpilot-update.timer",
-        "crashpilot-snapshot.service",
-        "crashpilot-snapshot.timer",
-    ]
     result: dict[str, Any] = {"refreshed": False, "units": [], "error": None}
     if not systemd_dir.is_dir() or not unit_dir.is_dir() or not os.access(unit_dir, os.W_OK):
         return result
 
     copied: list[str] = []
+    added: list[str] = []
     try:
-        for name in unit_names:
+        for name in REFRESHED_UNITS:
             src = systemd_dir / name
             if src.is_file():
                 dest = unit_dir / name
+                if not dest.exists():
+                    added.append(name)
                 if src.suffix == ".service":
                     _install_systemd_unit_template(src, dest)
                 else:
@@ -95,20 +135,16 @@ def _refresh_systemd_units(bundle_root: Path) -> dict[str, Any]:
                 copied.append(name)
         if not copied:
             return result
-        subprocess.run(["systemctl", "daemon-reload"], check=False, capture_output=True, text=True, timeout=30)
-        for timer in [
-            "crashpilot-heartbeat.timer",
-            "crashpilot-update.timer",
-            "crashpilot-snapshot.timer",
-        ]:
+        _systemctl("daemon-reload")
+        for timer in _TIMERS:
             if timer in copied:
-                subprocess.run(
-                    ["systemctl", "enable", "--now", timer],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
+                _systemctl("enable", "--now", timer)
+        # Its ExecStop only runs at shutdown if it was started. Only a new
+        # install is enabled, so one an operator disabled stays disabled.
+        if _SIGNOFF_UNIT in added:
+            _systemctl("enable", "--now", _SIGNOFF_UNIT)
+        # try-restart leaves a stopped server stopped.
+        _systemctl("try-restart", _API_UNITS)
         result.update({"refreshed": True, "units": copied})
     except Exception as exc:
         result["error"] = str(exc)
@@ -147,7 +183,8 @@ def install_latest(
     state_path = data_dir / "agent-bundle.sha256"
 
     expected = _parse_checksum(_download(checksum_url))
-    if not force and state_path.exists() and state_path.read_text().strip() == expected:
+    current = not force and state_path.exists() and state_path.read_text().strip() == expected
+    if current and not _units_missing():
         return {"updated": False, "checksum": expected}
 
     bundle = _download(bundle_url)
@@ -167,27 +204,32 @@ def install_latest(
         if not (agent_dir / "pyproject.toml").is_file():
             raise RuntimeError("agent bundle is missing agent/pyproject.toml")
 
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--quiet",
-                "--force-reinstall",
-                "--no-deps",
-                str(agent_dir),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip()
-            raise RuntimeError(f"agent update install failed: {detail}")
+        if not current:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--quiet",
+                    "--force-reinstall",
+                    "--no-deps",
+                    str(agent_dir),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout).strip()
+                raise RuntimeError(f"agent update install failed: {detail}")
 
         systemd_result = _refresh_systemd_units(bundle_root)
+
+    if current:
+        # The code was already current; only missing units were filled in.
+        return {"updated": False, "checksum": expected, "systemd": systemd_result}
 
     egress_tracker_cleared = _clear_egress_tracker(data_dir)
     state_path.write_text(expected + "\n", encoding="utf-8")
