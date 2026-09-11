@@ -6,3 +6,5 @@ After=network-online.target
 Type=oneshot
 ExecStart=__CRASHPILOT_BIN__ snapshot --quiet
 Nice=10
+# Files it creates (crash database, journal and dmesg caches) are private.
+UMask=0077

@@ -20,6 +20,8 @@ EnvironmentFile=-%h/.config/crashpilot/.env
 # Security
 PrivateTmp=true
 NoNewPrivileges=true
+# Files it creates (crash database, journal and dmesg caches) are private.
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

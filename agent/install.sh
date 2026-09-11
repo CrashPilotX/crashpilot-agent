@@ -3,12 +3,19 @@
 # Supports: Ubuntu Linux and Ubuntu on WSL1/WSL2.
 set -uo pipefail   # no -e: we handle errors explicitly so one bad package can't abort
 
+# Everything runs inside main(), called on the last line. Under `curl | bash`
+# a script runs as it arrives, so a download cut short ran a prefix of the
+# installer and usually exited 0. Bash reads a function to its closing brace
+# before running any of it, so a cut-off download now runs nothing.
+main() {
+
 # ── Locate the repo ───────────────────────────────────────────────────────────
-# When run as `bash script.sh` from inside the repo, BASH_SOURCE[0] is the
-# script file itself and REPO_DIR is its parent directory.
-# When piped in via `bash -c "$(curl ...)"` or `curl | bash`, BASH_SOURCE[0]
-# is unbound or set to "bash", so we clone the repo to a temp directory instead.
-_src="${BASH_SOURCE[0]:-}"
+# When run as `bash script.sh` from inside the repo, the script file is the
+# one that called main() (BASH_SOURCE[1]; [0] is where main is defined) and
+# REPO_DIR is its parent directory.
+# When piped in via `bash -c "$(curl ...)"` or `curl | bash`, there is no such
+# file ([1] is unset), so we download the agent bundle to a temp directory instead.
+_src="${BASH_SOURCE[1]:-}"
 if [[ -n "$_src" && "$_src" != "bash" && -f "$_src" ]]; then
   REPO_DIR="$(cd "$(dirname "$_src")/.." && pwd)"
 fi
@@ -182,6 +189,23 @@ if [[ -n "$CONNECT_STRING" && -n "$ENROLL_STRING" ]]; then
   exit 2
 fi
 
+# A root install writes these paths into systemd units, where whitespace
+# splits ExecStart and % starts a specifier, and through sed, where & and |
+# are special. Refuse anything else up front rather than write broken units.
+unit_safe_path() {
+  [[ "$1" =~ ^/[A-Za-z0-9._/@+:-]+$ ]]
+}
+
+if [[ $EUID -eq 0 ]]; then
+  for path in "$DATA_DIR" "$CONFIG_DIR"; do
+    if ! unit_safe_path "$path"; then
+      err "Unusable install or config directory: '$path'."
+      err "Use an absolute path of letters, digits and . _ - / @ + : (CRASHPILOT_INSTALL_DIR, CRASHPILOT_CONFIG_DIR)."
+      exit 2
+    fi
+  done
+fi
+
 banner() {
 cat << 'EOF'
    ____               _    ____  _ _       _
@@ -271,22 +295,6 @@ _sudo() {
   else
     sudo "$@"
   fi
-}
-
-# Ask a yes/no question on the controlling terminal. Under `curl | bash`
-# stdin is the script itself, so a plain `read` consumed the next line of
-# this file as the answer. With no terminal at all, take the default.
-ask_yes_no() {
-  local prompt="$1" default="$2" reply=""
-  if [[ -t 0 ]]; then
-    read -rp "$prompt" reply || reply=""
-  elif [[ -r /dev/tty ]] && { : < /dev/tty; } 2>/dev/null; then
-    read -rp "$prompt" reply < /dev/tty || reply=""
-  else
-    reply="$default"
-  fi
-  [[ -z "$reply" ]] && reply="$default"
-  [[ "$reply" =~ ^[Yy] ]]
 }
 
 install_python() {
@@ -578,14 +586,15 @@ if [[ $EUID -eq 0 ]]; then
   # System-wide install: /usr/local/bin is readable by all users
   create_wrapper /usr/local/bin/crashpilot
   # Other users need the venv to run the CLI, so share exactly that. The data
-  # directory holds the local API token (agent.token) and the crash database;
-  # the old recursive chmod over all of $DATA_DIR made both world-readable on
-  # every install and upgrade. Re-close anything a previous run opened.
+  # directory holds the local API token (agent.token), the crash database and
+  # journal/dmesg caches; the old recursive chmod over all of $DATA_DIR made
+  # them world-readable on every install and upgrade. Create it private now,
+  # before a unit can create it 0755, and re-close anything a previous run
+  # opened.
   chmod a+rX "$DATA_DIR"
   chmod -R a+rX "$VENV_DIR"
-  if [[ -d "$DATA_DIR/data" ]]; then
-    chmod -R go-rwx "$DATA_DIR/data"
-  fi
+  install -d -m 0700 "$DATA_DIR/data"
+  chmod -R go-rwx "$DATA_DIR/data"
   ok "Installed wrapper: /usr/local/bin/crashpilot"
 else
   LOCAL_BIN="$HOME/.local/bin"
@@ -615,6 +624,30 @@ install_unit() {
   _sudo install -m 0644 -o root -g root "$rendered" "/etc/systemd/system/$dest_name"
 }
 
+# The agent finds its config and data by itself only in the default places
+# (/etc/crashpilot, /opt/crashpilot/data); a moved install used to send the
+# data to /root, where the sandboxed boot analysis cannot write. Tell each
+# service where they are in a drop-in, which an agent update refreshing the
+# units leaves alone. With the defaults, a drop-in from an earlier run is
+# removed.
+install_paths_dropin() {
+  local unit="$1" dir="/etc/systemd/system/$1.d" conf="$WORK_DIR/$1.paths.conf"
+  local lines=""
+  [[ "$CONFIG_DIR" != "/etc/crashpilot" ]] && lines+="Environment=CRASHPILOT_CONFIG_DIR=$CONFIG_DIR"$'\n'
+  if [[ "$DATA_DIR" != "/opt/crashpilot" ]]; then
+    lines+="Environment=CRASHPILOT_DATA_DIR=$DATA_DIR/data"$'\n'
+    # The boot analysis runs with /var read-only and home directories protected.
+    [[ "$unit" == "crashpilot.service" ]] && lines+="ReadWritePaths=-$DATA_DIR/data"$'\n'
+  fi
+  if [[ -z "$lines" ]]; then
+    _sudo rm -f "$dir/10-crashpilot-paths.conf"
+    return 0
+  fi
+  printf '[Service]\n%s' "$lines" > "$conf" || return 1
+  _sudo install -d -m 0755 "$dir" \
+    && _sudo install -m 0644 -o root -g root "$conf" "$dir/10-crashpilot-paths.conf"
+}
+
 install_systemd_services() {
   local service_src="$REPO_DIR/systemd"
   local unit timer failed=0
@@ -631,7 +664,7 @@ install_systemd_services() {
     install_unit "$service_src/crashpilot-signoff.service" crashpilot-signoff.service || failed=1
   fi
 
-  # Heartbeat, the verified daily update check, and the rolling flight
+  # Heartbeat, the verified hourly update check, and the rolling flight
   # recorder. Each ships as a service plus a timer; install whichever this
   # bundle has.
   local timers=(crashpilot-heartbeat.timer crashpilot-update.timer crashpilot-snapshot.timer)
@@ -640,6 +673,13 @@ install_systemd_services() {
     if [[ -f "$service_src/$unit" && -f "$service_src/$timer" ]]; then
       install_unit "$service_src/$unit" "$unit" || failed=1
       install_unit "$service_src/$timer" "$timer" || failed=1
+    fi
+  done
+
+  for unit in crashpilot.service crashpilot-api@.service crashpilot-signoff.service \
+              crashpilot-heartbeat.service crashpilot-update.service crashpilot-snapshot.service; do
+    if [[ -f "/etc/systemd/system/$unit" ]]; then
+      install_paths_dropin "$unit" || failed=1
     fi
   done
 
@@ -667,7 +707,7 @@ install_systemd_services() {
   ok "systemd services installed and API server started"
   echo -e "  Boot analysis enabled: will run once per boot"
   echo -e "  Heartbeat timer: enabled (will ping dashboard every 60 s once configured)"
-  echo -e "  Automatic updates: enabled (verified daily update check)"
+  echo -e "  Automatic updates: enabled (verified hourly update check)"
   echo -e "  Flight recorder: enabled (rolling one-minute snapshots)"
 }
 
@@ -698,23 +738,30 @@ RUNIT
   ok "runit service installed at $sv_dir"
 }
 
-# Whether to install systemd units without asking: INSTALL_SYSTEMD=yes, or a
-# root install (the dashboard one-liner runs under sudo). INSTALL_SYSTEMD=no
-# is checked first so it holds on WSL as well.
+# Whether to install the systemd units: only on a root install (the
+# dashboard one-liner runs under sudo). The units run as root, and a
+# non-root install's venv is owned by that user, so units pointing into it
+# would run code the user can change, as root; they would also read root's
+# config, not the user's. INSTALL_SYSTEMD=no is checked first, so it holds
+# on WSL as well.
 systemd_install_consented() {
-  [[ "$INSTALL_SYSTEMD" == "yes" || $EUID -eq 0 ]] && return 0
-  ask_yes_no "$1" "y"
+  [[ $EUID -eq 0 ]] && return 0
+  warn "Skipping systemd services: they run as root, so only a root install sets them up."
+  warn "To install them, re-run the installer with sudo."
+  if [[ "$INSTALL_SYSTEMD" == "yes" ]]; then
+    INSTALL_PROBLEMS+=("INSTALL_SYSTEMD=yes needs a root install: re-run with sudo")
+  fi
+  return 1
 }
 
 if [[ "$INSTALL_SYSTEMD" == "no" ]]; then
   info "Systemd install skipped (INSTALL_SYSTEMD=no)"
 
 elif [[ $IS_WSL -eq 1 && "$INIT_SYS" == "systemd" ]]; then
-  if systemd_install_consented "Install systemd services for WSL (requires sudo)? [Y/n] "; then
+  if systemd_install_consented; then
     info "WSL with systemd detected: installing heartbeat timer"
     install_systemd_services
   else
-    info "Skipping systemd services"
     echo -e "  ${DIM}Run manually after connecting: crashpilot heartbeat${RESET}"
   fi
 
@@ -724,10 +771,8 @@ elif [[ $IS_WSL -eq 1 ]]; then
   echo -e "  ${DIM}Or enable systemd in WSL2 for automatic heartbeat timers.${RESET}"
 
 elif [[ "$INIT_SYS" == "systemd" ]]; then
-  if systemd_install_consented "Install systemd services (requires sudo)? [Y/n] "; then
+  if systemd_install_consented; then
     install_systemd_services
-  else
-    info "Skipping systemd services"
   fi
 
 elif [[ "$INIT_SYS" == "openrc" ]]; then
@@ -777,7 +822,9 @@ if [[ -n "$CONNECT_STRING" ]]; then
   section "Connecting to dashboard"
   if [[ -z "$CRASHPILOT_BIN" ]]; then
     err "Cannot connect: the CrashPilot CLI is not available."
-  elif "$CRASHPILOT_BIN" configure "$CONNECT_STRING"; then
+  # On stdin, not as an argument: every local user can read another
+  # process's arguments in /proc/<pid>/cmdline.
+  elif printf '%s\n' "$CONNECT_STRING" | "$CRASHPILOT_BIN" configure -; then
     # `configure` enables the heartbeat timer and sends the first heartbeat itself,
     # so the system is online as soon as this returns.
     CONNECTED=1
@@ -795,13 +842,15 @@ if [[ -n "$ENROLL_STRING" ]]; then
   if [[ -z "$CRASHPILOT_BIN" ]]; then
     err "Cannot enroll: the CrashPilot CLI is not available."
     INSTALL_PROBLEMS+=("enrolling with the dashboard failed")
-  elif "$CRASHPILOT_BIN" enroll "$ENROLL_STRING"; then
+  # On stdin (see configure above), which `enroll` also saves the token from,
+  # before it tries, so a later heartbeat can still enroll.
+  elif printf '%s\n' "$ENROLL_STRING" | "$CRASHPILOT_BIN" enroll -; then
     # `enroll` saves this machine's own credentials, enables the timers, and
     # sends the first heartbeat, so it is online as soon as this returns.
     CONNECTED=1
   else
-    err "Could not enroll with that join token."
-    err "Check it on the dashboard's Systems page: it may be revoked, expired, or used up."
+    err "Could not enroll with that join token yet. It is saved, and the heartbeat timer tries again."
+    err "If that keeps failing, check it on the dashboard's Systems page: it may be revoked, expired, or used up."
     INSTALL_PROBLEMS+=("enrolling with the dashboard failed")
   fi
 fi
@@ -850,4 +899,7 @@ fi
 echo ""
 echo -e "  ${DIM}Something not working? Run ${RESET}${CYAN}sudo crashpilot doctor${RESET}${DIM}: it diagnoses config, connection, and the timer.${RESET}"
 echo ""
+}
+
+main "$@"
 

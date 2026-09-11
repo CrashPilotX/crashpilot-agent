@@ -5,6 +5,10 @@ Documentation=https://crashpilotx.com/docs
 # the network goes down and the sign-off can still reach the dashboard.
 After=network-online.target
 Wants=network-online.target
+# Units stop in reverse start order: starting before everything that sends a
+# heartbeat means those stop first, so no heartbeat lands after the sign-off
+# and marks the machine online again.
+Before=crashpilot-heartbeat.timer crashpilot-heartbeat.service crashpilot-update.timer crashpilot-update.service
 
 [Service]
 Type=oneshot
@@ -16,6 +20,8 @@ ExecStart=/bin/true
 ExecStop=__CRASHPILOT_BIN__ sign-off --quiet
 # A dead network must never hold up a shutdown.
 TimeoutStopSec=8
+# Files it creates (crash database, journal and dmesg caches) are private.
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -17,6 +18,73 @@ def require(text: str, needle: str, reason: str) -> None:
         raise AssertionError(f"Missing `{needle}`: {reason}")
 
 
+def function_source(script: str, name: str) -> str:
+    """The text of one shell function, from `name() {` to its closing brace."""
+    start = script.index(f"{name}() {{")
+    end = script.index("\n}\n", start) + 3
+    return script[start:end]
+
+
+def check_non_root_gets_no_system_units(script: str) -> None:
+    # A non-root run used to install system units (the prompt defaulted to
+    # yes, even with no terminal) whose ExecStart ran the user's own venv as
+    # root: anyone who could write to it had root.
+    if os.geteuid() == 0:
+        return  # the behaviour under test needs a non-root EUID
+    probe = (
+        'warn() { echo "WARN: $*"; }\nINSTALL_PROBLEMS=()\n'
+        + function_source(script, "systemd_install_consented")
+        + '\nfor INSTALL_SYSTEMD in yes auto; do\n'
+        + '  if systemd_install_consented; then echo "INSTALLS:$INSTALL_SYSTEMD"; fi\n'
+        + 'done\necho "PROBLEMS:${#INSTALL_PROBLEMS[@]}"\n'
+    )
+    result = subprocess.run(
+        ["setsid", "bash", "-s"], input=probe, capture_output=True, text=True, check=True,
+    )
+    if "INSTALLS:" in result.stdout:
+        raise AssertionError(f"a non-root run must never install system units: {result.stdout!r}")
+    require(result.stdout, "sudo", "a non-root run should say to re-run with sudo")
+    require(result.stdout, "PROBLEMS:1", "INSTALL_SYSTEMD=yes without root is a problem to report")
+
+
+def check_truncated_download_runs_nothing(script: str) -> None:
+    # `curl | sudo bash` runs lines as they arrive, so a download cut short
+    # ran a prefix of the installer and usually exited 0. With the body in a
+    # function called on the last line, any cut inside it is a syntax error.
+    lines = script.splitlines(keepends=True)
+    last = max(i for i, line in enumerate(lines) if line.strip())
+    require(lines[last], 'main "$@"', "the last line must be the only top-level call")
+    opening = next(i for i, line in enumerate(lines) if line.startswith("main() {"))
+    before = "".join(lines[:opening])
+    for line in before.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith(("#", "set -uo pipefail")):
+            raise AssertionError(f"nothing may run before main() is fully read: {line!r}")
+    for cut in range(opening + 1, last, 7):
+        result = subprocess.run(
+            ["bash", "-n"], input="".join(lines[:cut]), capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            raise AssertionError(f"a download cut after line {cut} would still run")
+
+
+def check_install_paths_are_validated(script: str) -> None:
+    # A space in CRASHPILOT_INSTALL_DIR split ExecStart; a % is a unit
+    # specifier; both went into the units unchecked.
+    probe = function_source(script, "unit_safe_path") + (
+        '\nfor p in /opt/crashpilot /srv/crash-pilot_2 "/opt/crash pilot" /opt/100% relative/dir "/opt/a&b"; do\n'
+        '  if unit_safe_path "$p"; then echo "OK:$p"; else echo "NO:$p"; fi\n'
+        "done\n"
+    )
+    result = subprocess.run(["bash", "-s"], input=probe, capture_output=True, text=True, check=True)
+    expected = [
+        "OK:/opt/crashpilot", "OK:/srv/crash-pilot_2", "NO:/opt/crash pilot",
+        "NO:/opt/100%", "NO:relative/dir", "NO:/opt/a&b",
+    ]
+    if result.stdout.split("\n")[:-1] != expected:
+        raise AssertionError(f"install path validation: {result.stdout!r}")
+
+
 def main() -> None:
     script = INSTALLER.read_text(encoding="utf-8")
 
@@ -29,6 +97,8 @@ def main() -> None:
     )
     require(help_result.stdout, "--connect", "installer help should document dashboard connection")
     require(help_result.stdout, "--enroll", "installer help should document join-token enrollment")
+    if "Standalone installer detected" in help_result.stdout:
+        raise AssertionError("run from a checkout, the installer must use it rather than download the bundle")
 
     both = subprocess.run(
         ["bash", INSTALLER_FOR_BASH, "--connect", "cpilot_x", "--enroll", "cpjoin_y"],
@@ -79,7 +149,13 @@ def main() -> None:
     require(script, "crashpilot-snapshot.timer", "systemd installs should enable the flight recorder")
     require(script, "crashpilot-signoff.service", "systemd installs should sign off on clean shutdown")
     require(script, 'systemctl enable --now crashpilot-signoff.service', "the sign-off unit must be started so its ExecStop runs at shutdown")
-    require(script, '"$CRASHPILOT_BIN" enroll "$ENROLL_STRING"', "--enroll should hand the join token to `crashpilot enroll`")
+    # Secrets go to the CLI on stdin: an argument is readable by every local
+    # user in /proc/<pid>/cmdline, for up to five minutes while enroll retries.
+    require(script, '"$ENROLL_STRING" | "$CRASHPILOT_BIN" enroll -', "--enroll should hand the join token to `crashpilot enroll` on stdin")
+    require(script, '"$CONNECT_STRING" | "$CRASHPILOT_BIN" configure -', "--connect should hand the connection string to `crashpilot configure` on stdin")
+    for leak in ('enroll "$ENROLL_STRING"', 'configure "$CONNECT_STRING"'):
+        if leak in script:
+            raise AssertionError(f"secrets must not be passed on the command line: {leak}")
     require(script, "Flight recorder: enabled", "installer summary should confirm the flight recorder")
     require(script, "speedtest-cli", "installer should set up internet capacity checks automatically")
     require(script, "install_speedtest_cli", "speedtest capacity support should be installed without an interactive prompt")
@@ -100,6 +176,29 @@ def main() -> None:
     update_timer = (ROOT / "systemd" / "crashpilot-update.timer").read_text(encoding="utf-8")
     require(update_service, "update --quiet", "update service should call the restricted updater command")
     require(update_timer, "Persistent=true", "missed update checks should run after the machine returns")
+    require(update_timer, "OnCalendar=hourly", "the update check runs hourly")
+    for text, where in ((script, "install.sh"), (update_timer, "crashpilot-update.timer")):
+        if "daily" in text.lower():
+            raise AssertionError(f"{where} must not describe the hourly update check as daily")
+
+    # Files the agent creates hold journal and dmesg text. The update service
+    # is the exception: pip must leave the shared venv readable.
+    for unit in (ROOT / "systemd").glob("crashpilot*.service"):
+        text = unit.read_text(encoding="utf-8")
+        if unit.name == "crashpilot-update.service":
+            if "UMask=" in text:
+                raise AssertionError("the update service must not make the reinstalled venv private")
+        else:
+            require(text, "UMask=0077", f"{unit.name} should create its files private")
+
+    # Units stop in reverse start order: starting before the heartbeat means
+    # the sign-off runs after it has stopped, so no heartbeat can land after
+    # the sign-off and mark the node online again.
+    signoff = (ROOT / "systemd" / "crashpilot-signoff.service").read_text(encoding="utf-8")
+    for unit in ("crashpilot-heartbeat.timer", "crashpilot-heartbeat.service", "crashpilot-update.service"):
+        before = next((line for line in signoff.splitlines() if line.startswith("Before=")), "")
+        require(before, unit, "the sign-off must stop after every unit that sends heartbeats")
+    require(signoff, "TimeoutStopSec=8", "a dead network must never hold up a shutdown")
 
     # ── Hardening: each of these was a real hole in an earlier version ────────
     if "/tmp/crashpilot" in script:
@@ -115,7 +214,14 @@ def main() -> None:
             "a recursive chmod over the install dir makes the API token and crash DB world-readable"
         )
     require(script, 'chmod -R a+rX "$VENV_DIR"', "only the venv should be shared with other users")
+    require(script, 'install -d -m 0700 "$DATA_DIR/data"', "a fresh install must create the data dir private before any unit creates it 0755")
     require(script, 'chmod -R go-rwx "$DATA_DIR/data"', "upgrades must re-close a data dir older installers opened")
+    # Outside the default locations the agent cannot find its config and
+    # data dirs by itself; a drop-in survives the updater refreshing units.
+    require(script, "Environment=CRASHPILOT_DATA_DIR=", "a moved install must tell the units where its data is")
+    require(script, "Environment=CRASHPILOT_CONFIG_DIR=", "a moved config must be passed to the units")
+    require(script, "ReadWritePaths=", "the sandboxed boot analysis must be able to write a moved data dir")
+    require(script, '"/etc/systemd/system/$1.d"', "paths go in drop-ins, which an updater refresh leaves alone")
     if "bootstrap.pypa.io" in script:
         raise AssertionError("never pipe an unverified download from bootstrap.pypa.io into Python as root")
     require(script, "--proto '=https' --tlsv1.2", "bundle downloads must refuse plain http and old TLS")
@@ -126,23 +232,11 @@ def main() -> None:
         raise AssertionError("the .env template must not suggest a data dir the service cannot write")
     require(script, 'exit 1\nfi\necho -e "${GREEN}${BOLD}✓ Installation complete!', "a run with problems must exit non-zero")
     if "read -rp \"Install systemd" in script:
-        raise AssertionError("service prompts must go through ask_yes_no, which reads the terminal, not stdin")
+        raise AssertionError("service installs must never prompt from stdin, which is the script under curl | bash")
 
-    # Behaviour, not just text: with the script itself on stdin (curl | bash)
-    # and no terminal, the prompt must take its default instead of reading
-    # the next line of the piped script as the answer.
-    start = script.index("ask_yes_no() {")
-    end = script.index("\n}\n", start) + 3
-    probe = (
-        script[start:end]
-        + '\nif ask_yes_no "Install? [Y/n] " "y"; then echo DEFAULT_YES; else echo ANSWERED_NO; fi\n'
-        + "echo NEXT_LINE_RAN\n"
-    )
-    piped = subprocess.run(
-        ["setsid", "bash", "-s"], input=probe, capture_output=True, text=True, check=True,
-    )
-    if "DEFAULT_YES" not in piped.stdout or "NEXT_LINE_RAN" not in piped.stdout:
-        raise AssertionError(f"ask_yes_no consumed the piped script: {piped.stdout!r} {piped.stderr!r}")
+    check_non_root_gets_no_system_units(script)
+    check_truncated_download_runs_nothing(script)
+    check_install_paths_are_validated(script)
 
     unsupported_managers = ["dnf", "pacman", "zypper", "apk", "xbps"]
     active_installs = [

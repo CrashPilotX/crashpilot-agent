@@ -10,3 +10,5 @@ Type=oneshot
 ExecStart=__CRASHPILOT_BIN__ heartbeat --quiet
 # Exit 0 = sent or not-configured (no-op). Exit 1 = a real failure we want to see.
 SuccessExitStatus=0
+# Files it creates (crash database, journal and dmesg caches) are private.
+UMask=0077

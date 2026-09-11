@@ -299,9 +299,21 @@ def token(
     ))
 
 
+def _read_secret(value: str, env_name: str | None = None) -> str:
+    """A secret from its argument, from standard input when the argument is
+    "-", or else from the environment. The last two keep it off the command
+    line, which every local user can read in /proc/<pid>/cmdline."""
+    import os
+    import sys
+
+    if value.strip() == "-":
+        return sys.stdin.readline().strip()
+    return value or (os.environ.get(env_name, "") if env_name else "")
+
+
 @app.command()
 def configure(
-    connection_string: str = typer.Argument(..., help="Connection string from the CrashPilot dashboard (starts with cpilot_)"),
+    connection_string: str = typer.Argument("", help="Connection string from the CrashPilot dashboard (starts with cpilot_), or - to read it from standard input. Defaults to CRASHPILOT_CONNECT."),
 ) -> None:
     """[bold]Configure[/bold] push mode using the connection string from the dashboard."""
     import base64
@@ -309,6 +321,14 @@ def configure(
 
     from . import config as cfg_mod
     from .cloud_push import push_heartbeat
+
+    connection_string = _read_secret(connection_string, "CRASHPILOT_CONNECT")
+    if not connection_string.strip():
+        console.print(
+            "[red]No connection string.[/red] Pass it, use [cyan]-[/cyan] to read it from standard "
+            "input, or set CRASHPILOT_CONNECT."
+        )
+        raise typer.Exit(1)
 
     # Strip prefix
     raw = connection_string.strip()
@@ -552,7 +572,7 @@ def _auto_enroll(join_token: str, *, detected: str = "") -> None:
 
 @app.command()
 def enroll(
-    join_token: str = typer.Argument("", help="Join token from the dashboard (starts with cpjoin_). Defaults to CRASHPILOT_ENROLL_TOKEN."),
+    join_token: str = typer.Argument("", help="Join token from the dashboard (starts with cpjoin_), or - to read it from standard input. Defaults to CRASHPILOT_ENROLL_TOKEN."),
     external_id: str = typer.Option("", "--external-id", help="Identity to enroll under. Detected automatically when omitted: Kubernetes node name, then cloud instance ID, then machine ID."),
     force: bool = typer.Option(False, "--force", help="Enroll even if this machine already has working credentials."),
 ) -> None:
@@ -562,11 +582,15 @@ def enroll(
     from .enrollment import EnrollmentError, EnrollmentRetired, note_enroll_attempt
 
     cfg = cfg_mod.get_settings()
+    # One read from standard input counts as handed to this command, so it is
+    # saved like an argument (install.sh passes it that way).
+    join_token = _read_secret(join_token)
     token_str = join_token or cfg.enroll_token
     if not token_str:
         console.print(
-            "[red]No join token.[/red] Pass one ([cyan]crashpilot enroll cpjoin_...[/cyan]) or set "
-            "CRASHPILOT_ENROLL_TOKEN. Create one on the dashboard's Systems page."
+            "[red]No join token.[/red] Pass one ([cyan]crashpilot enroll cpjoin_...[/cyan], or "
+            "[cyan]-[/cyan] to read it from standard input) or set CRASHPILOT_ENROLL_TOKEN. "
+            "Create one on the dashboard's Systems page."
         )
         raise typer.Exit(1)
 
@@ -626,13 +650,14 @@ def sign_off_command(
 ) -> None:
     """[bold]Sign off[/bold]: tell the dashboard this machine is shutting down cleanly.
 
-    Run at shutdown by crashpilot-signoff.service and by the Kubernetes
-    preStop hook. The next heartbeat undoes it, so a reboot needs nothing
-    extra. Always exits 0: a failed sign-off must never hold up a shutdown.
+    Run at shutdown by crashpilot-signoff.service, and by the container
+    entrypoint when a container or pod stops. The next heartbeat undoes it,
+    so a reboot needs nothing extra. Always exits 0: a failed sign-off must
+    never hold up a shutdown.
     """
     try:
         # Imports and settings inside the try too: a malformed .env must not
-        # turn into a failed ExecStop or preStop hook.
+        # turn into a failed ExecStop.
         from .config import get_settings
         from .enrollment import sign_off
 
@@ -1020,7 +1045,7 @@ def doctor() -> None:
 
         update_state = _systemctl("is-active", "crashpilot-update.timer")
         if update_state == "active":
-            report("Automatic updates", "ok", "daily verified update check enabled")
+            report("Automatic updates", "ok", "hourly verified update check enabled")
         else:
             report("Automatic updates", "warn", update_state or "not found",
                    "Re-run the installer to enable crashpilot-update.timer.")

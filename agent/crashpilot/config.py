@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from typing import Optional
 
@@ -34,15 +35,45 @@ def _find_env_file() -> Path:
     return Path.home() / ".config" / "crashpilot" / ".env"
 
 
+_INSTALLER_DATA_DIR = Path("/opt/crashpilot/data")
+_PACKAGE_DATA_DIR = Path("/var/lib/crashpilot")
+
+
 def _default_data_dir() -> Path:
     """
     System-wide install (root wrote to /opt/crashpilot) → /opt/crashpilot/data
+    Ubuntu package (its services use /var/lib/crashpilot) → /var/lib/crashpilot
     Per-user install                                     → ~/.local/share/crashpilot
     """
-    system_dir = Path("/opt/crashpilot/data")
+    system_dir = _INSTALLER_DATA_DIR
     if system_dir.parent.exists() and os.access(system_dir.parent, os.W_OK):
         return system_dir
+    if _PACKAGE_DATA_DIR.is_dir() and os.access(_PACKAGE_DATA_DIR, os.W_OK):
+        return _PACKAGE_DATA_DIR
     return Path.home() / ".local" / "share" / "crashpilot"
+
+
+def _make_private_dir(path: Path) -> None:
+    """Create the data dir 0700, and close one that is open.
+
+    It holds the crash database and journal/dmesg caches. Found open when a
+    Kubernetes hostPath (DirectoryOrCreate) or an older install created it
+    0755. Only a directory of our own is tightened: owned by this user, not
+    sticky, and named for crashpilot, so a shared directory someone set
+    CRASHPILOT_DATA_DIR to by mistake (/var/lib, /tmp) is left alone.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        st = path.stat()
+        if (
+            st.st_mode & 0o077
+            and st.st_uid == os.geteuid()
+            and not st.st_mode & stat.S_ISVTX
+            and any("crashpilot" in part.lower() for part in path.resolve().parts[-2:])
+        ):
+            path.chmod(0o700)
+    except OSError:
+        pass
 
 
 class Settings(BaseSettings):
@@ -140,7 +171,7 @@ class Settings(BaseSettings):
 
     def model_post_init(self, __context: object) -> None:
         data_dir = self.data_dir or _default_data_dir()
-        data_dir.mkdir(parents=True, exist_ok=True)
+        _make_private_dir(data_dir)
         object.__setattr__(self, "data_dir", data_dir)
 
         if self.db_path is None:

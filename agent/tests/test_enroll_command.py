@@ -71,6 +71,18 @@ class TestEnrollCommand:
         assert heartbeats == ["tok-1"]
         assert fake_enroll == [{"secret": "s3cret", "external_id": "machine:abc"}]
 
+    def test_token_from_stdin_is_saved_like_an_argument(self, tmp_path, fake_enroll, heartbeats):
+        # How install.sh hands it over, so it never shows in /proc/<pid>/cmdline.
+        result = runner.invoke(app, ["enroll", "-"], input=_join() + "\n")
+        assert result.exit_code == 0, result.output
+        assert "CRASHPILOT_ENROLL_TOKEN=cpjoin_" in (tmp_path / ".env").read_text()
+        assert fake_enroll == [{"secret": "s3cret", "external_id": "machine:abc"}]
+
+    def test_empty_stdin_is_explained(self):
+        result = runner.invoke(app, ["enroll", "-"], input="")
+        assert result.exit_code == 1
+        assert "No join token" in result.output
+
     def test_explicit_identity_is_passed_through(self, fake_enroll, heartbeats):
         result = runner.invoke(app, ["enroll", _join(), "--external-id", "rack-7/slot-3"])
         assert result.exit_code == 0, result.output

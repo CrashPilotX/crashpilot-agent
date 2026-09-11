@@ -119,6 +119,25 @@ class TestConfigure:
         result = runner.invoke(app, ["configure", conn_str])
         assert result.exit_code != 0
 
+    def test_connection_string_from_the_environment(self, tmp_path, monkeypatch):
+        # install.sh passed it as an argument, readable by every user in
+        # /proc/<pid>/cmdline while configure ran.
+        monkeypatch.setenv("CRASHPILOT_CONNECT", _make_conn_str(token="from-env"))
+        result = runner.invoke(app, ["configure"])
+        assert result.exit_code == 0, result.output
+        assert "CRASHPILOT_SUPABASE_TOKEN=from-env" in (tmp_path / ".env").read_text()
+
+    def test_connection_string_from_stdin(self, tmp_path):
+        result = runner.invoke(app, ["configure", "-"], input=_make_conn_str(token="from-stdin") + "\n")
+        assert result.exit_code == 0, result.output
+        assert "CRASHPILOT_SUPABASE_TOKEN=from-stdin" in (tmp_path / ".env").read_text()
+
+    def test_no_connection_string_at_all_is_explained(self, monkeypatch):
+        monkeypatch.delenv("CRASHPILOT_CONNECT", raising=False)
+        result = runner.invoke(app, ["configure"])
+        assert result.exit_code == 1
+        assert "CRASHPILOT_CONNECT" in result.output
+
     def test_success_message_shown(self):
         """Success output should confirm the agent connected / saved credentials."""
         conn_str = _make_conn_str()
