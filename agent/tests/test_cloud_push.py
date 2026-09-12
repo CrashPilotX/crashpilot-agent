@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -946,3 +947,104 @@ class TestNetworkMetrics:
 
         assert result["available"] is False
         assert "speedtest-cli" in result["error"]
+
+
+class TestCriticalKernelLines:
+    """What counts as a critical kernel event, and when it counts."""
+
+    def test_the_nvidia_version_banner_is_not_a_critical_event(self):
+        from crashpilot.cloud_push import _LIVE_DMESG_PATTERN
+
+        banner = "NVRM: loading NVIDIA UNIX Open Kernel Module for x86_64  595.84  Release Build"
+        assert not _LIVE_DMESG_PATTERN.search(banner)
+
+    def test_real_nvidia_failures_still_count(self):
+        from crashpilot.cloud_push import _LIVE_DMESG_PATTERN
+
+        for line in (
+            "NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory [NV_ERR_NO_MEMORY]",
+            "NVRM: Xid (PCI:0000:01:00): 79, GPU has fallen off the bus",
+            "NVRM: GPU0 _kgmmuClientShadowFaultBufferPagesAllocate: Allocation failed",
+        ):
+            assert _LIVE_DMESG_PATTERN.search(line), line
+
+    def test_reads_both_stamped_forms(self):
+        from crashpilot.cloud_push import _dmesg_line_time
+
+        iso = _dmesg_line_time("2026-09-12T07:13:34,690460-05:00 NVRM: Xid", None)
+        assert iso == pytest.approx(datetime(2026, 9, 12, 12, 13, 34, 690460, tzinfo=timezone.utc).timestamp())
+        assert _dmesg_line_time("[ 1234.500000] NVRM: Xid", 1_000_000.0) == pytest.approx(1_001_234.5)
+        assert _dmesg_line_time("NVRM: Xid with no timestamp", 1_000_000.0) is None
+
+    def test_only_lines_inside_the_window_count(self):
+        # The ring buffer keeps days of lines; one burst used to be re-counted
+        # on every collection, alerting every half hour until it rotated.
+        from crashpilot.cloud_push import _LIVE_DMESG_WINDOW_SECONDS, _recent_critical
+
+        now = datetime(2026, 9, 12, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+        old = datetime(2026, 9, 10, 7, 22, 0, tzinfo=timezone.utc)
+        fresh = datetime(2026, 9, 12, 11, 58, 0, tzinfo=timezone.utc)
+        lines = [
+            f"{old.isoformat()} NVRM: Out of memory two days ago",
+            f"{fresh.isoformat()} NVRM: Out of memory just now",
+        ]
+        recent, stamped = _recent_critical(lines, now)
+        assert stamped is True
+        assert recent == [lines[1]]
+        assert _LIVE_DMESG_WINDOW_SECONDS == 1800
+
+    def test_without_timestamps_every_line_still_counts(self):
+        from crashpilot.cloud_push import _recent_critical
+
+        lines = ["NVRM: Out of memory", "EXT4-fs error (device sda1)"]
+        recent, stamped = _recent_critical(lines, 1_000_000.0)
+        assert stamped is False
+        assert recent == lines
+
+    def test_a_burst_from_days_ago_no_longer_reports_itself_again(self, monkeypatch, tmp_path):
+        """server1's case: a GPU ran out of memory on one morning, the lines
+        stayed in the ring buffer, and every collection counted them again."""
+        from crashpilot import cloud_push
+
+        old_burst = datetime(2026, 9, 10, 7, 22, 0, tzinfo=timezone.utc)
+        lines = "\n".join(
+            f"{old_burst.isoformat()} NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: Out of memory"
+            for _ in range(10)
+        )
+
+        class _Result:
+            returncode = 0
+            stdout = lines
+            stderr = ""
+
+        monkeypatch.setattr(cloud_push.subprocess, "run", lambda *a, **k: _Result())
+        monkeypatch.setattr(cloud_push, "_live_dmesg_cache_path", lambda: tmp_path / "live_dmesg.json")
+
+        dmesg = cloud_push._collect_live_dmesg()
+
+        assert dmesg["critical_total"] == 10, "the lines are still in the buffer"
+        assert dmesg["critical_count"] == 0, "but none of them is new, so nothing is raised"
+        assert dmesg["critical_events"], "the dashboard still sees them as context"
+
+    def test_a_fresh_burst_is_reported(self, monkeypatch, tmp_path):
+        from crashpilot import cloud_push
+
+        just_now = datetime.now(timezone.utc)
+
+        class _Result:
+            returncode = 0
+            stdout = f"{just_now.isoformat()} NVRM: Xid (PCI:0000:01:00): 79, GPU has fallen off the bus"
+            stderr = ""
+
+        monkeypatch.setattr(cloud_push.subprocess, "run", lambda *a, **k: _Result())
+        monkeypatch.setattr(cloud_push, "_live_dmesg_cache_path", lambda: tmp_path / "live_dmesg.json")
+
+        dmesg = cloud_push._collect_live_dmesg()
+
+        assert dmesg["critical_count"] == 1
+        assert dmesg["critical_total"] == 1
+
+    def test_no_critical_lines_is_not_mistaken_for_unreadable_timestamps(self):
+        from crashpilot.cloud_push import _recent_critical
+
+        assert _recent_critical([], 1_000_000.0) == ([], True)
