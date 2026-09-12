@@ -34,8 +34,15 @@ _TIMEOUT = httpx.Timeout(10.0)
 # dmidecode, device models in lsblk and mount points in df are not always
 # UTF-8, and a strict decode failed the whole heartbeat every minute.
 _LIVE_DMESG_TTL_SECONDS = 300
+_DMESG_ISO_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[,.]\d+)?(?:[+-]\d{2}:?\d{2}|Z))")
+_DMESG_MONOTONIC_TIME = re.compile(r"^\[\s*(\d+\.\d+)\]")
 _LIVE_DMESG_TAIL_CHARS = 800
 _LIVE_DMESG_MAX_CRITICAL = 10
+# Only kernel lines this recent count as something to raise. The ring
+# buffer keeps days of history, so counting all of it reported one burst
+# again on every collection until the buffer rotated. Matches the interval
+# the dmesg section is sent on, so nothing inside a window is missed.
+_LIVE_DMESG_WINDOW_SECONDS = 1800
 _HARDWARE_PROFILE_TTL_SECONDS = 86400  # 24 h: hardware almost never changes
 
 # Per-section send intervals for stable heartbeat sections.
@@ -70,7 +77,9 @@ _LIVE_DMESG_PATTERN = re.compile(
         r"SCSI.*error",
         r"nvme.*error",
         r"GPU fault",
-        r"NVRM:",
+        # NVRM prints its version banner on every boot, so match the
+        # failures (Xid faults, allocation failures) rather than the name.
+        r"NVRM:.*(?:Xid|fault|error|fail|Out of memory|timeout|hang)",
         r"amdgpu.*ERROR",
         r"PCIe.*error",
         r"AER:",
@@ -497,6 +506,64 @@ def _save_live_dmesg_cache(path: Path | None, dmesg: dict[str, Any]) -> None:
         return
 
 
+def _boot_time() -> float | None:
+    """When this boot started, for dmesg output stamped in seconds since it."""
+    try:
+        with open("/proc/uptime", encoding="utf-8") as handle:
+            return time.time() - float(handle.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _dmesg_line_time(line: str, boot_time: float | None) -> float | None:
+    """When a dmesg line was logged, or None when it cannot be read.
+
+    Handles the two stamped forms: --time-format=iso, which is asked for
+    first because it does not depend on the machine's locale, and the plain
+    seconds-since-boot form.
+    """
+    iso = _DMESG_ISO_TIME.match(line)
+    if iso:
+        # Normalized for Python 3.10's stricter parser: a comma for the
+        # fraction, a trailing Z, and an offset written without its colon.
+        stamp = iso.group(1).replace(",", ".")
+        stamp = re.sub(r"Z$", "+00:00", stamp)
+        stamp = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", stamp)
+        try:
+            return datetime.fromisoformat(stamp).timestamp()
+        except ValueError:
+            return None
+    monotonic = _DMESG_MONOTONIC_TIME.match(line)
+    if monotonic and boot_time is not None:
+        try:
+            return boot_time + float(monotonic.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _recent_critical(critical: list[str], now: float) -> tuple[list[str], bool]:
+    """The critical lines logged within the window, and whether times were read.
+
+    With no readable timestamp anywhere (an unstamped dmesg), every line
+    counts, which is what this did before: noisier, but nothing is missed.
+    """
+    if not critical:
+        return [], True
+    boot_time = _boot_time()
+    cutoff = now - _LIVE_DMESG_WINDOW_SECONDS
+    recent: list[str] = []
+    stamped = False
+    for line in critical:
+        logged_at = _dmesg_line_time(line, boot_time)
+        if logged_at is None:
+            continue
+        stamped = True
+        if logged_at >= cutoff:
+            recent.append(line)
+    return (recent, True) if stamped else (list(critical), False)
+
+
 def _collect_live_dmesg() -> dict[str, Any]:
     """Collect a small, throttled dmesg snapshot for the dashboard."""
     cache_path = _live_dmesg_cache_path()
@@ -506,6 +573,8 @@ def _collect_live_dmesg() -> dict[str, Any]:
 
     output = ""
     for args in (
+        # iso first: its timestamps parse the same in any locale.
+        ["dmesg", "--time-format=iso", "--level=emerg,alert,crit,err,warn"],
         ["dmesg", "-T", "--level=emerg,alert,crit,err,warn"],
         ["dmesg", "--level=emerg,alert,crit,err,warn"],
     ):
@@ -526,11 +595,17 @@ def _collect_live_dmesg() -> dict[str, Any]:
 
     lines = [line for line in output.splitlines() if line.strip()]
     critical = [line for line in lines if _LIVE_DMESG_PATTERN.search(line)]
+    recent, stamped = _recent_critical(critical, time.time())
     dmesg = {
         "collected_at": datetime.now(timezone.utc).isoformat(),
         "tail": "\n".join(lines)[-_LIVE_DMESG_TAIL_CHARS:],
-        "critical_events": critical[:_LIVE_DMESG_MAX_CRITICAL],
-        "critical_count": len(critical),
+        # critical_count is what raises an alert, so it counts only what is
+        # recent; critical_total is everything still in the buffer, which the
+        # dashboard shows as context.
+        "critical_events": (recent or critical[-_LIVE_DMESG_MAX_CRITICAL:])[:_LIVE_DMESG_MAX_CRITICAL],
+        "critical_count": len(recent),
+        "critical_total": len(critical),
+        "critical_window_seconds": _LIVE_DMESG_WINDOW_SECONDS if stamped else None,
         "refresh_interval_seconds": _LIVE_DMESG_TTL_SECONDS,
     }
     _save_live_dmesg_cache(cache_path, dmesg)
