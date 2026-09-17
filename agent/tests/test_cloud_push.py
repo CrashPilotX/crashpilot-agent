@@ -1048,3 +1048,99 @@ class TestCriticalKernelLines:
         from crashpilot.cloud_push import _recent_critical
 
         assert _recent_critical([], 1_000_000.0) == ([], True)
+
+    def test_a_line_stamped_in_the_future_does_not_count_as_recent(self):
+        # A clock corrected backwards, or an RTC that booted wrong, leaves
+        # lines stamped ahead of now. With no upper bound they stay "recent"
+        # on every collection and re-raise the same burst forever - the storm
+        # the window was added to stop.
+        from crashpilot.cloud_push import _recent_critical
+
+        now = datetime(2026, 9, 12, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+        ahead = datetime(2026, 9, 14, 12, 0, 0, tzinfo=timezone.utc)
+        lines = [f"{ahead.isoformat()} NVRM: Out of memory two days from now"]
+
+        recent, stamped = _recent_critical(lines, now)
+
+        assert stamped is True
+        assert recent == [], "a stamp in the future is not believable, so it is not recent"
+
+    def test_a_standalone_gpu_bus_drop_counts_without_an_xid(self):
+        # Once the Xid line rotates out of the ring buffer, one of these may be
+        # all that is left of the failure.
+        from crashpilot.cloud_push import _LIVE_DMESG_PATTERN
+
+        for line in (
+            "NVRM: GPU0 has fallen off the bus.",
+            "NVRM: A GPU crash dump has been created.",
+        ):
+            assert _LIVE_DMESG_PATTERN.search(line), line
+
+    def test_an_unreadable_dmesg_is_not_reported_as_a_clean_one(self, monkeypatch, tmp_path):
+        # kernel.dmesg_restrict=1 without CAP_SYSLOG. Reporting zero critical
+        # events here reads exactly like a healthy kernel log, so a real
+        # disk-failure or Xid storm would stay invisible indefinitely.
+        from crashpilot import cloud_push
+
+        class _Denied:
+            returncode = 1
+            stdout = ""
+            stderr = "dmesg: read kernel buffer failed: Operation not permitted"
+
+        monkeypatch.setattr(cloud_push.subprocess, "run", lambda *a, **k: _Denied())
+        monkeypatch.setattr(cloud_push, "_live_dmesg_cache_path", lambda: tmp_path / "live_dmesg.json")
+
+        dmesg = cloud_push._collect_live_dmesg()
+
+        assert dmesg["available"] is False
+        assert "not permitted" in dmesg["error"]
+        assert dmesg["critical_count"] == 0
+
+    def test_a_genuinely_clean_buffer_is_marked_available(self, monkeypatch, tmp_path):
+        from crashpilot import cloud_push
+
+        class _Empty:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        monkeypatch.setattr(cloud_push.subprocess, "run", lambda *a, **k: _Empty())
+        monkeypatch.setattr(cloud_push, "_live_dmesg_cache_path", lambda: tmp_path / "live_dmesg.json")
+
+        dmesg = cloud_push._collect_live_dmesg()
+
+        assert dmesg["available"] is True
+        assert dmesg["error"] is None
+        assert dmesg["critical_count"] == 0
+
+    def test_the_ctime_fallback_is_gone(self, monkeypatch, tmp_path):
+        # `dmesg -T` prints ctime stamps that match neither timestamp pattern,
+        # so every line read as unstamped and the whole buffer counted as
+        # recent, restoring the storm on any host where iso was unavailable.
+        # Plain dmesg's seconds-since-boot stamps are parsed, so -T bought
+        # nothing that the remaining fallback does not.
+        from crashpilot import cloud_push
+
+        attempted: list[list[str]] = []
+
+        class _Failed:
+            returncode = 1
+            stdout = ""
+            stderr = "dmesg: unrecognized option '--time-format=iso'"
+
+        class _Plain:
+            returncode = 0
+            stdout = "[ 1234.500000] NVRM: Xid (PCI:0000:01:00): 79"
+            stderr = ""
+
+        def _record(args, *a, **k):
+            attempted.append(list(args))
+            return _Failed() if "--time-format=iso" in args else _Plain()
+
+        monkeypatch.setattr(cloud_push.subprocess, "run", _record)
+        monkeypatch.setattr(cloud_push, "_live_dmesg_cache_path", lambda: tmp_path / "live_dmesg.json")
+
+        cloud_push._collect_live_dmesg()
+
+        assert len(attempted) == 2, attempted
+        assert not any("-T" in args for args in attempted), attempted
