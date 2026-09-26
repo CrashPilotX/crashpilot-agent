@@ -36,7 +36,11 @@ CRITICAL_PATTERNS = [
     r"SCSI.*error",
     r"nvme.*error",
     r"GPU fault",
-    r"NVRM:",
+    # Match NVRM failures, not the version banner the driver prints on every
+    # boot. Kept in step with the live-dmesg pattern in cloud_push.py, which
+    # was narrowed for this reason while this copy was left counting banners.
+    r"NVRM:.*(?:Xid|fault|error|fail|Out of memory|timeout|hang"
+    r"|fallen off the bus|crash dump|RmInitAdapter)",
     r"amdgpu.*ERROR",
     r"PCIe.*error",
     r"AER:",                    # PCIe Advanced Error Reporting
