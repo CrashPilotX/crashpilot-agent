@@ -48,7 +48,9 @@ class DetectionResult:
     evidence_sources: list[str] = field(default_factory=list)
 
 
-# Heuristic rules - ordered by priority
+# Heuristic rules. List order is not priority: the winner is the match with the
+# most evidence lines, then the more severe, and order only breaks an exact tie.
+# That is why one line matching two rules was a real bug - the earlier rule won.
 _RULES: list[tuple[CrashType, Severity, list[str]]] = [
     (CrashType.KERNEL_PANIC, Severity.CRITICAL, [
         r"Kernel panic",
@@ -69,7 +71,10 @@ _RULES: list[tuple[CrashType, Severity, list[str]]] = [
         r"Out of memory: Killed process",  # kernel 5.x+
         r"oom_kill_process",
         r"Killed process \d+.*oom_kill",
-        r"oom-killer invoked",
+        # The kernel prints "<process> invoked oom-killer: gfp_mask=...". This
+        # used to read "oom-killer invoked", which the kernel never prints, so
+        # a log whose only OOM evidence was this line came back as no crash.
+        r"invoked oom-killer",
         r"Memory cgroup out of memory",
     ]),
     (CrashType.THERMAL_SHUTDOWN, Severity.HIGH, [
@@ -79,10 +84,18 @@ _RULES: list[tuple[CrashType, Severity, list[str]]] = [
         r"CPU.*thermal throttle",
         r"PM: suspend.*thermal",
     ]),
+    # Two patterns removed from here, both of which named something that is
+    # not a watchdog reset:
+    #  - "watchdog: BUG" is the prefix of the kernel's soft lockup report,
+    #    "watchdog: BUG: soft lockup - CPU#N stuck". It matched this rule as
+    #    well as SOFT_LOCKUP, won the tie by coming first, and reported a
+    #    soft lockup as a reboot that never happened.
+    #  - "NMI watchdog" matched the boot message "NMI watchdog: Enabled.
+    #    Permanently consumes one hw-PMU counter." and older kernels' soft
+    #    lockup prefix "NMI watchdog: BUG: soft lockup". A real hard lockup
+    #    always says "hard LOCKUP", which is matched below.
     (CrashType.WATCHDOG_RESET, Severity.HIGH, [
-        r"watchdog: BUG",
         r"hard LOCKUP",
-        r"NMI watchdog",
         r"watchdog reset",
     ]),
     (CrashType.SOFT_LOCKUP, Severity.HIGH, [
@@ -94,7 +107,10 @@ _RULES: list[tuple[CrashType, Severity, list[str]]] = [
     (CrashType.GPU_FAULT, Severity.HIGH, [
         r"NVRM: Xid",
         r"amdgpu.*GPU fault",
-        r"GPU fell off the bus",
+        # The driver says "GPU has fallen off the bus" and "fallen off the bus
+        # and is not responding to commands". This read "GPU fell off the
+        # bus" and only caught the event when an Xid line was also present.
+        r"(?:fell|fallen) off the bus",
         r"NVRM.*RmInitAdapter.*failed",
         r"drm.*GPU HANG",
     ]),
@@ -140,6 +156,12 @@ def detect_crash_type(telemetry: dict[str, Any]) -> DetectionResult:
 
     for crash_type, severity, patterns in _RULES[:-1]:  # skip CLEAN_SHUTDOWN
         hits = _match_patterns(crash_type.value, text_corpus, patterns)
+        if crash_type is not CrashType.KERNEL_PANIC:
+            # A panic line names its trigger - "Kernel panic - not syncing:
+            # Hard LOCKUP", "...: hung_task: blocked tasks". Counted as
+            # evidence for that trigger as well, it gave the trigger a second
+            # line and let it outvote the panic it caused.
+            hits = [h for h in hits if not _PANIC_LINE.search(h)]
         if not hits:
             continue
         confidence = min(0.95, 0.5 + len(hits) * 0.1)
@@ -268,6 +290,10 @@ _PANIC_MARKERS = re.compile(
     r"\bBUG:|(?i:kernel panic|general protection fault|double fault|triple fault"
     r"|machine check exception|\bmce:|mcelog)"
 )
+
+# The line the kernel prints when it gives up. It names what triggered the
+# panic, so other rules can match it too - see detect_crash_type.
+_PANIC_LINE = re.compile(r"Kernel panic - not syncing", re.IGNORECASE)
 
 
 def _has_panic_patterns(corpus: str) -> bool:
