@@ -43,6 +43,11 @@ _LIVE_DMESG_MAX_CRITICAL = 10
 # again on every collection until the buffer rotated. Matches the interval
 # the dmesg section is sent on, so nothing inside a window is missed.
 _LIVE_DMESG_WINDOW_SECONDS = 1800
+# How far ahead of now a kernel timestamp may sit and still be believed. A line
+# stamped further into the future came from a clock since corrected backwards,
+# or an RTC that booted wrong; with no upper bound it stays "recent" on every
+# collection forever, which is the storm the window above exists to stop.
+_DMESG_CLOCK_SKEW_SECONDS = 120
 _HARDWARE_PROFILE_TTL_SECONDS = 86400  # 24 h: hardware almost never changes
 
 # Per-section send intervals for stable heartbeat sections.
@@ -79,7 +84,11 @@ _LIVE_DMESG_PATTERN = re.compile(
         r"GPU fault",
         # NVRM prints its version banner on every boot, so match the
         # failures (Xid faults, allocation failures) rather than the name.
-        r"NVRM:.*(?:Xid|fault|error|fail|Out of memory|timeout|hang)",
+        # "fallen off the bus" and "crash dump" are spelled out because they
+        # share no substring with the others, and a GPU that drops off the bus
+        # may be the only line left once its Xid has rotated out of the buffer.
+        r"NVRM:.*(?:Xid|fault|error|fail|Out of memory|timeout|hang"
+        r"|fallen off the bus|crash dump|RmInitAdapter)",
         r"amdgpu.*ERROR",
         r"PCIe.*error",
         r"AER:",
@@ -554,11 +563,17 @@ def _recent_critical(critical: list[str], now: float) -> tuple[list[str], bool]:
     cutoff = now - _LIVE_DMESG_WINDOW_SECONDS
     recent: list[str] = []
     stamped = False
+    horizon = now + _DMESG_CLOCK_SKEW_SECONDS
     for line in critical:
         logged_at = _dmesg_line_time(line, boot_time)
         if logged_at is None:
             continue
         stamped = True
+        # A stamp past the horizon is not believable, and counting it would
+        # re-report the same burst on every collection for as long as it sits
+        # in the buffer. It still shows up in critical_total.
+        if logged_at > horizon:
+            continue
         if logged_at >= cutoff:
             recent.append(line)
     return (recent, True) if stamped else (list(critical), False)
@@ -572,10 +587,18 @@ def _collect_live_dmesg() -> dict[str, Any]:
         return cached
 
     output = ""
+    available = False
+    failure: str | None = None
     for args in (
         # iso first: its timestamps parse the same in any locale.
         ["dmesg", "--time-format=iso", "--level=emerg,alert,crit,err,warn"],
-        ["dmesg", "-T", "--level=emerg,alert,crit,err,warn"],
+        # Then plain, whose [12345.678] stamps are seconds since boot and are
+        # parsed against /proc/uptime. There is deliberately no `dmesg -T`
+        # fallback: its ctime stamps match neither timestamp pattern, so every
+        # line read as unstamped and the whole buffer counted as recent on
+        # every collection - the storm this window exists to stop. A host whose
+        # kernel records no timestamps at all (printk.time=0) cannot be helped
+        # by -T either, since -T only reformats a stamp the kernel did record.
         ["dmesg", "--level=emerg,alert,crit,err,warn"],
     ):
         try:
@@ -587,10 +610,21 @@ def _collect_live_dmesg() -> dict[str, Any]:
                 errors="replace",
                 timeout=10,
             )
-        except (OSError, subprocess.SubprocessError):
+        except FileNotFoundError:
+            failure = "dmesg is not installed"
             continue
-        if result.returncode == 0 and result.stdout.strip():
-            output = result.stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            failure = f"dmesg could not be run: {exc}"
+            continue
+        if result.returncode != 0:
+            # Usually kernel.dmesg_restrict=1 without CAP_SYSLOG. Reported
+            # rather than swallowed: a kernel log nobody can read must not be
+            # indistinguishable from a clean one.
+            failure = (result.stderr or "").strip()[:200] or f"dmesg exited {result.returncode}"
+            continue
+        available = True
+        output = result.stdout
+        if output.strip():
             break
 
     lines = [line for line in output.splitlines() if line.strip()]
@@ -607,6 +641,10 @@ def _collect_live_dmesg() -> dict[str, Any]:
         "critical_total": len(critical),
         "critical_window_seconds": _LIVE_DMESG_WINDOW_SECONDS if stamped else None,
         "refresh_interval_seconds": _LIVE_DMESG_TTL_SECONDS,
+        # Without these, a dmesg that cannot be read at all reported zero
+        # critical events, which reads exactly like a healthy kernel log.
+        "available": available,
+        "error": None if available else (failure or "dmesg produced no output"),
     }
     _save_live_dmesg_cache(cache_path, dmesg)
     return dmesg
