@@ -76,7 +76,16 @@ class TestOomKill:
         assert result.crash_type == CrashType.OOM_KILL
 
     def test_oom_killer_invoked(self):
-        tel = _tel(dmesg_tail="oom-killer invoked with order=0")
+        """The kernel's own wording: '<process> invoked oom-killer: ...'.
+
+        This test used to feed 'oom-killer invoked', the reversed phrase the
+        old regex expected, so it passed while real logs whose only OOM
+        evidence was this line came back as no crash at all.
+        """
+        tel = _tel(dmesg_tail=(
+            "[ 4021.337461] python3 invoked oom-killer: "
+            "gfp_mask=0x140cca(GFP_HIGHUSER_MOVABLE|__GFP_COMP), order=0, oom_score_adj=0"
+        ))
         result = detect_crash_type(tel)
         assert result.crash_type == CrashType.OOM_KILL
 
@@ -94,6 +103,52 @@ class TestWatchdog:
         result = detect_crash_type(tel)
         assert result.crash_type == CrashType.WATCHDOG_RESET
 
+    def test_panic_outranks_the_lockup_that_triggered_it(self):
+        """A hard lockup that ends in a panic is a panic. The panic line also
+        says 'Hard LOCKUP', and counting it as lockup evidence gave the lockup
+        two lines to the panic's one."""
+        tel = _tel(dmesg_tail=(
+            "[    5.884655] watchdog: Watchdog detected hard LOCKUP on cpu 2\n"
+            "[    5.901220] Kernel panic - not syncing: Hard LOCKUP"
+        ))
+        result = detect_crash_type(tel)
+        assert result.crash_type == CrashType.KERNEL_PANIC
+        assert CrashType.WATCHDOG_RESET.value in [a["crash_type"] for a in result.alternatives]
+
+    def test_hung_task_panic_is_a_panic(self):
+        """The same trap through hung_task_panic: the panic line itself
+        matches a lockup rule."""
+        tel = _tel(dmesg_tail=(
+            "[  245.112000] INFO: task kworker/0:1:42 blocked for more than 122 seconds.\n"
+            "[  245.130000] Kernel panic - not syncing: hung_task: blocked tasks"
+        ))
+        result = detect_crash_type(tel)
+        assert result.crash_type == CrashType.KERNEL_PANIC
+
+    def test_nmi_watchdog_boot_message_is_not_a_watchdog_reset(self):
+        """Printed on every boot on many machines."""
+        tel = _tel(dmesg_tail="[    0.201384] NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.")
+        result = detect_crash_type(tel)
+        assert result.crash_type != CrashType.WATCHDOG_RESET
+
+
+class TestSoftLockup:
+    def test_soft_lockup_is_not_a_watchdog_reset(self):
+        """The kernel reports a soft lockup as 'watchdog: BUG: soft lockup'.
+        That prefix also matched the watchdog rule, which is listed first and
+        won the tie, so most soft lockups in real logs were reported as a
+        watchdog reset: a reboot that never happened."""
+        tel = _tel(dmesg_tail="[  147.294432] watchdog: BUG: soft lockup - CPU#2 stuck for 26s! [kworker/2:1:123]")
+        result = detect_crash_type(tel)
+        assert result.crash_type == CrashType.SOFT_LOCKUP
+        assert CrashType.WATCHDOG_RESET.value not in [a["crash_type"] for a in result.alternatives]
+
+    def test_older_kernel_prefix(self):
+        """Older kernels print the same report as 'NMI watchdog: BUG: ...'."""
+        tel = _tel(dmesg_tail="[  147.294432] NMI watchdog: BUG: soft lockup - CPU#0 stuck for 22s! [swapper/0:0]")
+        result = detect_crash_type(tel)
+        assert result.crash_type == CrashType.SOFT_LOCKUP
+
 
 class TestGpuFault:
     def test_nvidia_xid(self):
@@ -103,6 +158,18 @@ class TestGpuFault:
 
     def test_drm_gpu_hang(self):
         tel = _tel(dmesg_tail="drm/i915: GPU HANG: ecode 9:1:85dffffb, in chrome [1234]")
+        result = detect_crash_type(tel)
+        assert result.crash_type == CrashType.GPU_FAULT
+
+    def test_fallen_off_the_bus_without_an_xid_line(self):
+        """The driver says 'has fallen off the bus'. The rule looked for 'fell
+        off the bus' and only caught this when an Xid line was also present."""
+        tel = _tel(dmesg_tail="[ 5812.004410] NVRM: GPU 0000:05:00.0: GPU has fallen off the bus.")
+        result = detect_crash_type(tel)
+        assert result.crash_type == CrashType.GPU_FAULT
+
+    def test_fallen_off_the_bus_not_responding(self):
+        tel = _tel(dmesg_tail="[ 5812.004410] NVRM: fallen off the bus and is not responding to commands.")
         result = detect_crash_type(tel)
         assert result.crash_type == CrashType.GPU_FAULT
 
@@ -302,15 +369,18 @@ class TestAlternatives:
         assert result.alternatives == []
 
     def test_surfaces_real_runner_up_when_multiple_patterns_match(self):
+        # Two genuinely different events: an OOM kill, then a soft lockup.
+        # This used to be two soft lockup lines, relying on "watchdog: BUG:
+        # soft lockup" matching the watchdog rule too - which was the bug
+        # that reported soft lockups as watchdog resets.
         tel = _tel(
             dmesg_tail=(
-                "soft lockup - CPU#2 stuck for 23s\n"
-                "watchdog: BUG: soft lockup detected on CPU#2"
+                "[16742.776482] Out of memory: Killed process 1234 (python3) total-vm:3558056kB\n"
+                "[16756.650915] watchdog: BUG: soft lockup - CPU#10 stuck for 26s! [swapper/10:0]"
             ),
         )
         result = detect_crash_type(tel)
-        # Both soft_lockup and watchdog_reset patterns match this text -
-        # whichever wasn't chosen as `best` must show up as a real alternative
+        # Whichever wasn't chosen as `best` must show up as a real alternative
         # with its own crash_type/confidence/evidence, not an invented one.
         assert result.alternatives
         alt = result.alternatives[0]
