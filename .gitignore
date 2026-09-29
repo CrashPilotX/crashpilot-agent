@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Benchmark corpus: other people's kernel logs, fetched on demand. Never commit.
+bench/corpus/
