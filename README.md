@@ -31,7 +31,7 @@ This agent watches every boot. When it sees an abnormal one, it reconstructs the
 | Power loss | Missing journal shutdown marker |
 | Disk I/O error | dmesg + smartctl SMART data |
 | Watchdog reset / soft lockup | kernel hung task detection |
-| PCIe fault | AER error reporting |
+| PCIe fault | Uncorrectable AER errors raise a live alert and go to the AI analysis; the offline heuristics do not classify them |
 
 ## What leaves your machine
 
