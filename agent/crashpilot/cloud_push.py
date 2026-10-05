@@ -81,13 +81,33 @@ _LIVE_DMESG_PATTERN = re.compile(
         # failures (Xid faults, allocation failures) rather than the name.
         r"NVRM:.*(?:Xid|fault|error|fail|Out of memory|timeout|hang)",
         r"amdgpu.*ERROR",
-        r"PCIe.*error",
-        r"AER:",
+        # PCIe faults the hardware could not recover from. These used to be
+        # bare "PCIe.*error" and "AER:", which also matched correctable errors
+        # (routine link noise the hardware has already recovered from), their
+        # detail lines, and the "AER: enabled" line printed at boot, and every
+        # one of those raised a critical alert. Current kernels say
+        # "Uncorrectable", older ones "Uncorrected".
+        r"Uncorrect(?:ed|able) \((?:Non-)?Fatal\)",
+        r"AER: (?:device recovery failed|can'?t recover)",
         r"thermal throttling",
         r"temperature.*critical",
     ]),
     re.IGNORECASE,
 )
+
+# Routine PCIe notices: correctable errors the hardware already recovered
+# from, and "AER: enabled" printed at boot. Never critical, whichever pattern
+# above happens to match them - a correctable error reported by an NVMe drive,
+# for one, would otherwise alert through "nvme.*error".
+_ROUTINE_PCIE_LINE = re.compile(
+    r"severity=Correct(?:ed|able)|AER: (?:Multiple )?Correct(?:ed|able) error|AER: enabled",
+    re.IGNORECASE,
+)
+
+
+def _is_critical_line(line: str) -> bool:
+    """Whether a dmesg line counts as a critical kernel event."""
+    return bool(_LIVE_DMESG_PATTERN.search(line)) and not _ROUTINE_PCIE_LINE.search(line)
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -594,7 +614,7 @@ def _collect_live_dmesg() -> dict[str, Any]:
             break
 
     lines = [line for line in output.splitlines() if line.strip()]
-    critical = [line for line in lines if _LIVE_DMESG_PATTERN.search(line)]
+    critical = [line for line in lines if _is_critical_line(line)]
     recent, stamped = _recent_critical(critical, time.time())
     dmesg = {
         "collected_at": datetime.now(timezone.utc).isoformat(),

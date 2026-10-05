@@ -968,6 +968,62 @@ class TestCriticalKernelLines:
         ):
             assert _LIVE_DMESG_PATTERN.search(line), line
 
+    def test_routine_pcie_notices_are_not_critical_events(self):
+        # Correctable errors are link noise the hardware already recovered
+        # from, and "AER: enabled" is printed at boot. Matched as bare "AER:"
+        # and "PCIe.*error", each raised a critical alert: a machine with
+        # routine PCIe noise alerted with nothing actually wrong.
+        from crashpilot.cloud_push import _is_critical_line
+
+        for line in (
+            "pcieport 0000:00:01.1: AER: enabled with IRQ 122",
+            "pcieport 0000:00:01.1: AER: Correctable error message received from 0000:01:00.0",
+            "pcieport 0000:00:01.1: AER: Multiple Correctable error message received from 0000:01:00.0",
+            "nvidia 0000:01:00.0: PCIe Bus Error: severity=Correctable, type=Data Link Layer, (Receiver ID)",
+            "pcieport 0000:00:1c.0: PCIe Bus Error: severity=Corrected, type=Physical Layer, (Receiver ID)",
+            "pcieport 0000:00:1c.0: AER:   [ 0] RxErr                  (First)",
+            # Also matched by "nvme.*error": routine noise is never critical,
+            # whichever pattern happens to catch it.
+            "nvme 0000:02:00.0: PCIe Bus Error: severity=Corrected, type=Physical Layer, (Receiver ID)",
+        ):
+            assert not _is_critical_line(line), line
+
+    def test_pcie_faults_the_hardware_could_not_recover_from_still_count(self):
+        from crashpilot.cloud_push import _is_critical_line
+
+        for line in (
+            "pcieport 0000:00:01.1: AER: Uncorrectable (Non-Fatal) error message received from 0000:01:00.0",
+            "pcieport 0000:00:01.1: AER: Multiple Uncorrectable (Fatal) error message received from 0000:01:00.0",
+            "nvidia 0000:01:00.0: PCIe Bus Error: severity=Uncorrected (Fatal), type=Transaction Layer, (Requester ID)",
+            "pcieport 0000:00:01.1: AER: device recovery failed",
+            "pcieport 0000:00:01.1: AER: can't recover (no error_detected callback)",
+        ):
+            assert _is_critical_line(line), line
+
+    def test_routine_pcie_noise_raises_nothing_end_to_end(self, monkeypatch, tmp_path):
+        """What the heartbeat actually sends: fresh correctable noise and the
+        boot line, with nothing else, must not count as critical."""
+        from crashpilot import cloud_push
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        class _Result:
+            returncode = 0
+            stdout = "\n".join([
+                f"{now} pcieport 0000:00:01.1: AER: enabled with IRQ 122",
+                f"{now} nvidia 0000:01:00.0: PCIe Bus Error: severity=Correctable, type=Data Link Layer, (Receiver ID)",
+                f"{now} pcieport 0000:00:01.1: AER: Correctable error message received from 0000:01:00.0",
+            ])
+            stderr = ""
+
+        monkeypatch.setattr(cloud_push.subprocess, "run", lambda *a, **k: _Result())
+        monkeypatch.setattr(cloud_push, "_live_dmesg_cache_path", lambda: tmp_path / "live_dmesg.json")
+
+        dmesg = cloud_push._collect_live_dmesg()
+
+        assert dmesg["critical_count"] == 0
+        assert dmesg["critical_total"] == 0
+
     def test_reads_both_stamped_forms(self):
         from crashpilot.cloud_push import _dmesg_line_time
 
