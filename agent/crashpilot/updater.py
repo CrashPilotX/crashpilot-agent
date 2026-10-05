@@ -80,16 +80,52 @@ def _crashpilot_bin_path() -> str:
     return str(candidate)
 
 
+def _atomic_write_unit(dest: Path, text: str) -> None:
+    """Write a systemd unit via temp-file-plus-rename.
+
+    A direct write interrupted by a full disk, an OOM kill or power loss leaves
+    a truncated unit behind. systemd then rejects it on daemon-reload and the
+    timer quietly stops existing, which is a monitoring outage that nothing
+    reports. os.replace is atomic on POSIX, so the unit is either the old one
+    or the new one.
+    """
+    tmp = dest.with_name(f".{dest.name}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _install_systemd_unit_template(src: Path, dest: Path) -> None:
     rendered = src.read_text(encoding="utf-8").replace(
         "__CRASHPILOT_BIN__",
         _crashpilot_bin_path(),
     )
-    dest.write_text(rendered, encoding="utf-8")
+    _atomic_write_unit(dest, rendered)
 
 
-def _systemctl(*args: str) -> None:
-    subprocess.run(["systemctl", *args], check=False, capture_output=True, text=True, timeout=30)
+def _systemctl(*args: str) -> str | None:
+    """Run systemctl; return a description of the failure, or None on success.
+
+    The return code used to be discarded, so a daemon-reload that failed or a
+    timer that would not enable still left the update reporting "refreshed" to
+    the dashboard - the one place an operator would look to find out.
+    """
+    command = " ".join(("systemctl", *args))
+    try:
+        result = subprocess.run(
+            ["systemctl", *args], check=False, capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"{command}: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        suffix = f": {detail[0][:160]}" if detail else ""
+        return f"{command} exited {result.returncode}{suffix}"
+    return None
 
 
 def _units_missing() -> bool:
@@ -131,21 +167,33 @@ def _refresh_systemd_units(bundle_root: Path) -> dict[str, Any]:
                 if src.suffix == ".service":
                     _install_systemd_unit_template(src, dest)
                 else:
-                    shutil.copy2(src, dest)
+                    _atomic_write_unit(dest, src.read_text(encoding="utf-8"))
                 copied.append(name)
         if not copied:
             return result
-        _systemctl("daemon-reload")
+        failures: list[str] = []
+        problem = _systemctl("daemon-reload")
+        if problem:
+            failures.append(problem)
         for timer in _TIMERS:
             if timer in copied:
-                _systemctl("enable", "--now", timer)
+                problem = _systemctl("enable", "--now", timer)
+                if problem:
+                    failures.append(problem)
         # Its ExecStop only runs at shutdown if it was started. Only a new
         # install is enabled, so one an operator disabled stays disabled.
         if _SIGNOFF_UNIT in added:
-            _systemctl("enable", "--now", _SIGNOFF_UNIT)
+            problem = _systemctl("enable", "--now", _SIGNOFF_UNIT)
+            if problem:
+                failures.append(problem)
         # try-restart leaves a stopped server stopped.
-        _systemctl("try-restart", _API_UNITS)
-        result.update({"refreshed": True, "units": copied})
+        problem = _systemctl("try-restart", _API_UNITS)
+        if problem:
+            failures.append(problem)
+        # Only claim a refresh when systemd actually accepted all of it.
+        result.update({"refreshed": not failures, "units": copied})
+        if failures:
+            result["error"] = "; ".join(failures[:3])
     except Exception as exc:
         result["error"] = str(exc)
     return result
