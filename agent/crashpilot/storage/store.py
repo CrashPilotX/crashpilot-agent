@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
+import time
 from contextlib import contextmanager
-from typing import Generator
+from typing import Any, Callable, Generator, TypeVar
 
 from ..config import get_settings
+
+T = TypeVar("T")
 
 # A report the cloud refuses this many times (an HTTP 4xx, not an outage) is
 # set aside: kept locally, but no longer re-sent every minute or left at the
@@ -64,14 +68,69 @@ CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_due
 """
 
 
+# Generous on purpose: every commit of first-time setup waits on an fsync, and on a
+# busy disk (a CI host extracting images, a spinning drive) a second of that per
+# commit queues up behind each contender. Waiting is better than not starting.
+_LOCK_TIMEOUT_SECONDS = 30.0
+
+
+def _while_locked(
+    operation: Callable[[], T],
+    timeout: float = _LOCK_TIMEOUT_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> T:
+    """Run a step of database setup, retrying while another process holds the lock.
+
+    The container starts the heartbeat loop and `crashpilot serve` together, and
+    on a new database both create it at once. When two connections contend for
+    the lock during that first write, SQLite sometimes answers "database is
+    locked" straight away, without consulting the connection's busy timeout,
+    which used to stop the server at startup (a container then exited with code
+    1 and, without a restart policy, stayed down). Every step of setup can be
+    run again safely, and the process that got there first is finished in
+    milliseconds, so the loser waits briefly and retries.
+    """
+    deadline = clock() + timeout
+    while True:
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if ("locked" not in message and "busy" not in message) or clock() >= deadline:
+                raise
+        sleep(0.02 + random.random() * 0.08)
+
+
+def _enable_wal(con: sqlite3.Connection, **retry: Any) -> None:
+    """Put the database in WAL mode.
+
+    The mode is stored in the database file, so once any process has switched
+    it every later connection finds WAL already on, and reading it takes no
+    write lock.
+    """
+
+    def switch() -> None:
+        mode = con.execute("PRAGMA journal_mode").fetchone()
+        if mode and str(mode[0]).lower() == "wal":
+            return
+        con.execute("PRAGMA journal_mode=WAL")
+
+    _while_locked(switch, **retry)
+
+
 @contextmanager
 def _conn() -> Generator[sqlite3.Connection, None, None]:
     cfg = get_settings()
     # str() required for Python 3.10 compatibility (Path accepted natively in 3.11+)
     con = sqlite3.connect(str(cfg.db_path), timeout=10)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA foreign_keys=ON")
+    try:
+        con.row_factory = sqlite3.Row
+        _enable_wal(con)
+        con.execute("PRAGMA foreign_keys=ON")
+    except BaseException:
+        con.close()
+        raise
     try:
         yield con
         con.commit()
@@ -84,21 +143,27 @@ def _conn() -> Generator[sqlite3.Connection, None, None]:
 
 def init_db() -> None:
     with _conn() as con:
-        con.executescript(SCHEMA)
+        _while_locked(lambda: con.executescript(SCHEMA))
         # Migration: add columns to databases created before they existed
         # (`pushed` came with cloud backfill, `push_rejections` later).
         cols = {row[1] for row in con.execute("PRAGMA table_info(crash_reports)")}
         for column in ("pushed", "push_rejections"):
             if column in cols:
                 continue
-            try:
-                con.execute(
-                    f"ALTER TABLE crash_reports ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+            def add_column(name: str = column) -> sqlite3.Cursor:
+                return con.execute(
+                    f"ALTER TABLE crash_reports ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0"
                 )
-            except sqlite3.OperationalError:
+
+            try:
+                _while_locked(add_column)
+            except sqlite3.OperationalError as exc:
                 # Another process (e.g. the heartbeat loop starting alongside the
-                # boot analysis) added the column first: that's fine.
-                pass
+                # boot analysis) added the column first: that's fine. Anything
+                # else, a lock that never cleared included, must not be passed
+                # off as success: the column would then be missing.
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
 
 def save_report(report: dict) -> str:

@@ -349,3 +349,125 @@ class TestRejectedReports:
             mark_push_rejected("crash_bad")
         save_report(_make_report("crash_bad"))  # analyze --force
         assert count_unpushed() == 1
+
+
+class TestFirstStartRace:
+    """The container starts the heartbeat loop and `crashpilot serve` together.
+
+    Both open a database that does not exist yet and switch it to WAL. SQLite
+    answers whichever loses with "database is locked" at once, without waiting
+    out the busy timeout, and the server used to die at startup with it (seen
+    in CI as a container exiting with code 1 on a fresh volume).
+    """
+
+    def test_simultaneous_first_start_does_not_fail(self, tmp_path, monkeypatch):
+        import threading
+
+        import crashpilot.config as cfg_mod
+        from crashpilot.storage.store import init_db
+
+        failures: list[str] = []
+        # Each trial is a brand-new database. Twenty is enough to fail on the old
+        # code every time (8 to 12 of 160 starts lost the race per run) and few
+        # enough not to crawl on a disk busy with other work.
+        for trial in range(20):
+            monkeypatch.setenv("CRASHPILOT_DB_PATH", str(tmp_path / f"fresh-{trial}.db"))
+            cfg_mod._settings = None
+            cfg_mod.get_settings()  # resolved once, before the threads start
+            barrier = threading.Barrier(4)
+
+            def start(gate: threading.Barrier) -> None:
+                gate.wait()
+                try:
+                    init_db()
+                except Exception as exc:  # noqa: BLE001 - the point is to collect any
+                    failures.append(repr(exc))
+
+            threads = [threading.Thread(target=start, args=(barrier,)) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        assert failures == []
+
+    def test_a_database_already_in_wal_is_not_switched_again(self):
+        from crashpilot.storage.store import _enable_wal
+
+        statements: list[str] = []
+
+        class Connection:
+            def execute(self, sql):
+                statements.append(sql)
+
+                class Row:
+                    def fetchone(self):
+                        return ("wal",)
+
+                return Row()
+
+        _enable_wal(Connection())  # type: ignore[arg-type]
+        assert statements == ["PRAGMA journal_mode"]
+
+    def test_a_locked_switch_is_retried_until_it_succeeds(self):
+        from crashpilot.storage.store import _enable_wal
+
+        attempts = {"switch": 0}
+        naps: list[float] = []
+
+        class Connection:
+            def execute(self, sql):
+                class Row:
+                    def fetchone(self_inner):
+                        return ("delete",)
+
+                if sql == "PRAGMA journal_mode=WAL":
+                    attempts["switch"] += 1
+                    if attempts["switch"] < 3:
+                        raise sqlite3.OperationalError("database is locked")
+                return Row()
+
+        _enable_wal(Connection(), sleep=naps.append)  # type: ignore[arg-type]
+        assert attempts["switch"] == 3
+        assert len(naps) == 2
+
+    def test_a_lock_that_never_clears_is_reported_after_the_timeout(self):
+        from crashpilot.storage.store import _enable_wal
+
+        now = {"t": 0.0}
+
+        class Connection:
+            def execute(self, sql):
+                class Row:
+                    def fetchone(self_inner):
+                        return ("delete",)
+
+                if sql == "PRAGMA journal_mode=WAL":
+                    raise sqlite3.OperationalError("database is locked")
+                return Row()
+
+        def nap(seconds: float) -> None:
+            now["t"] += 4.0
+
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            _enable_wal(Connection(), timeout=10.0, sleep=nap, clock=lambda: now["t"])  # type: ignore[arg-type]
+
+    def test_an_error_that_is_not_a_lock_is_not_retried(self):
+        from crashpilot.storage.store import _enable_wal
+
+        calls = {"n": 0}
+
+        class Connection:
+            def execute(self, sql):
+                class Row:
+                    def fetchone(self_inner):
+                        return ("delete",)
+
+                if sql == "PRAGMA journal_mode=WAL":
+                    calls["n"] += 1
+                    raise sqlite3.OperationalError("disk I/O error")
+                return Row()
+
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+            _enable_wal(Connection(), sleep=lambda s: None)  # type: ignore[arg-type]
+        assert calls["n"] == 1
