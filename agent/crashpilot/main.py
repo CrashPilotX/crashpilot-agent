@@ -128,6 +128,50 @@ def analyze(
 
 
 @app.command()
+def classify(
+    path: str = typer.Argument(
+        "-", help="Log file to classify, or - to read stdin (dmesg, journal, Xid, MCE, panic text)"
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output JSON"),
+) -> None:
+    """[bold]Classify[/bold] a pasted or saved log. Offline: no sudo, no network, no live host."""
+    import json
+    import sys
+
+    from .classify import classify_text
+
+    try:
+        if path == "-":
+            text = sys.stdin.read()
+        else:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        typer.echo(f"crashpilot: cannot read {path}: {exc.strerror or exc}", err=True)
+        raise typer.Exit(2) from exc
+
+    if not text.strip():
+        typer.echo("crashpilot: no log text to classify", err=True)
+        raise typer.Exit(2)
+
+    result = classify_text(text)
+
+    if json_output:
+        typer.echo(json.dumps(result, indent=2))
+        return
+
+    typer.echo(f"Category:   {result['category']}")
+    typer.echo(f"Severity:   {result['severity'].upper()}")
+    typer.echo(f"Confidence: {result['confidence']:.0%}")
+    typer.echo("Evidence:")
+    for line in result["evidence"]:
+        typer.echo(f"  {line}")
+    if result["alternatives"]:
+        typer.echo("Also matched:")
+        for alt in result["alternatives"]:
+            typer.echo(f"  {alt['category']} ({alt['confidence']:.0%})")
+
+
+@app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", "--host", help="API server host"),
     port: int = typer.Option(7878, "--port", help="API server port"),

@@ -67,6 +67,20 @@ sudo crashpilot analyze
 
 To connect it to a dashboard, see [Connecting to the dashboard](#connecting-to-the-dashboard).
 
+### Classify a log you already have
+
+`analyze` reads the machine it runs on. `classify` reads text you give it, so it works on a log from another
+machine, a bug report, or CI. No sudo, no account, no network, nothing written to disk:
+
+```bash
+crashpilot classify dmesg.txt          # a file
+journalctl -k -b -1 | crashpilot classify -   # stdin
+crashpilot classify dmesg.txt --json   # category, severity, confidence, evidence, alternatives
+```
+
+It runs the same heuristic detector as `analyze` (no AI step). See [docs/github-action.md](docs/github-action.md)
+for a GitHub Action that classifies a log file in a workflow and writes a job summary.
+
 ### Docker
 
 ```bash

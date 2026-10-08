@@ -1,0 +1,110 @@
+name: CrashPilot classify
+description: Classify a kernel, journal, Xid, MCE or panic log with CrashPilot and write a job summary. Offline, no account.
+author: CrashPilotX
+
+inputs:
+  file:
+    description: Path to a log file to classify. Either file or log is required.
+    required: false
+    default: ""
+  log:
+    description: Log text to classify, for example a previous step's output. Used when file is empty.
+    required: false
+    default: ""
+  python-version:
+    description: Python version to install CrashPilot with.
+    required: false
+    default: "3.12"
+  fail-on-severity:
+    description: Fail the step when the severity is this or worse (critical, high, medium, low). Empty never fails.
+    required: false
+    default: ""
+
+outputs:
+  category:
+    description: Detected category, for example gpu_fault or oom_kill.
+    value: ${{ steps.classify.outputs.category }}
+  severity:
+    description: critical, high, medium, low or info.
+    value: ${{ steps.classify.outputs.severity }}
+  confidence:
+    description: Confidence between 0 and 1.
+    value: ${{ steps.classify.outputs.confidence }}
+  json:
+    description: Path to the full JSON result.
+    value: ${{ steps.classify.outputs.json }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    # Installed from this action's own checkout, so the classifier always
+    # matches the ref the workflow pinned.
+    - name: Install CrashPilot
+      shell: bash
+      run: python -m pip install --quiet "${{ github.action_path }}/agent"
+
+    - name: Classify
+      id: classify
+      shell: bash
+      env:
+        CP_FILE: ${{ inputs.file }}
+        CP_LOG: ${{ inputs.log }}
+        CP_FAIL_ON: ${{ inputs.fail-on-severity }}
+      run: |
+        # Inputs arrive through env vars, never interpolated into the script,
+        # so log text cannot inject shell.
+        out="${RUNNER_TEMP}/crashpilot-classify.json"
+        if [ -n "$CP_FILE" ]; then
+          crashpilot classify "$CP_FILE" --json > "$out" || status=$?
+        elif [ -n "$CP_LOG" ]; then
+          printf '%s\n' "$CP_LOG" | crashpilot classify - --json > "$out" || status=$?
+        else
+          echo "::error::crashpilot: set the file or log input"
+          exit 2
+        fi
+        if [ "${status:-0}" -ne 0 ]; then
+          echo "::error::crashpilot classify failed (exit ${status})"
+          exit "${status}"
+        fi
+        python - "$out" <<'PY'
+        import json, os, sys
+
+        data = json.load(open(sys.argv[1]))
+        rank = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"category={data['category']}\n")
+            f.write(f"severity={data['severity']}\n")
+            f.write(f"confidence={data['confidence']}\n")
+            f.write(f"json={sys.argv[1]}\n")
+
+        lines = [
+            "## CrashPilot classification",
+            "",
+            "| Category | Severity | Confidence |",
+            "|---|---|---|",
+            f"| `{data['category']}` | {data['severity'].upper()} | {data['confidence']:.0%} |",
+            "",
+            "**Evidence**",
+            "",
+            "```",
+            *[e.replace("```", "'''") for e in data["evidence"]],
+            "```",
+        ]
+        if data["alternatives"]:
+            lines += ["", "**Also matched**", ""]
+            lines += [f"- `{a['category']}` ({a['confidence']:.0%})" for a in data["alternatives"]]
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+            f.write("\n".join(lines) + "\n")
+
+        fail_on = os.environ.get("CP_FAIL_ON", "").strip().lower()
+        if fail_on:
+            if fail_on not in rank:
+                sys.exit(f"::error::unknown fail-on-severity {fail_on}")
+            if rank[data["severity"]] >= rank[fail_on]:
+                print(f"::error::CrashPilot found {data['category']} ({data['severity']})")
+                sys.exit(1)
+        PY
