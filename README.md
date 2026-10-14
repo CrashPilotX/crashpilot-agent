@@ -25,7 +25,7 @@ This agent watches every boot. When it sees an abnormal one, it reconstructs the
 |---|---|
 | Out-of-memory kill | journalctl OOM killer events |
 | Kernel panic | dmesg + journalctl |
-| GPU fault (NVIDIA Xid) | nvidia-smi + journal |
+| GPU fault (NVIDIA Xid; AMD ring timeout, GPU reset, failed start) | nvidia-smi + kernel log |
 | Thermal shutdown | ACPI THERMTRIP + lm-sensors |
 | Machine Check Exception | mcelog / rasdaemon + dmesg |
 | Power loss | Missing journal shutdown marker |

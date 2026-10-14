@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ..amd_faults import LIVE_ALERT_PATTERNS
 from .base import BaseCollector, run_cmd
 
 # Patterns that indicate hardware/kernel problems
@@ -42,6 +43,7 @@ CRITICAL_PATTERNS = [
     r"NVRM:.*(?:Xid|fault|error|fail|Out of memory|timeout|hang"
     r"|fallen off the bus|crash dump|RmInitAdapter)",
     r"amdgpu.*ERROR",
+    *LIVE_ALERT_PATTERNS,       # amdgpu hangs, resets and failed starts: see amd_faults.py
     r"PCIe.*error",
     r"AER:",                    # PCIe Advanced Error Reporting
     r"Unrecovered Error",
