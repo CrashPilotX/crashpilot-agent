@@ -33,6 +33,17 @@ This agent watches every boot. When it sees an abnormal one, it reconstructs the
 | Watchdog reset / soft lockup | kernel hung task detection |
 | PCIe fault | Uncorrectable AER errors raise a live alert and go to the AI analysis; the offline heuristics do not classify them |
 
+### GPU load
+
+Connected to a dashboard, the heartbeat reports each GPU's utilization, memory, temperature and power.
+
+| GPU | Read through | Needs |
+|---|---|---|
+| NVIDIA | `nvidia-smi` | the NVIDIA driver's tool |
+| AMD | the kernel's `amdgpu` driver (sysfs) | nothing extra; `rocm-smi` is not required |
+
+An idle discrete AMD GPU is powered down by the driver after a few seconds. The agent never wakes a sleeping card to read it (the vendor tools do, and a wake-up every minute would change the machine's power behaviour). It reports such a card as `suspended`, 0% utilization, with its memory size, and shows temperature and power whenever the card is awake. Crash detection for GPU faults is separate; the table above lists what is classified.
+
 ## What leaves your machine
 
 This is the part worth reading closely before you install anything.
