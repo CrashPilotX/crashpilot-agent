@@ -25,6 +25,7 @@ from typing import Any, Callable
 import httpx
 
 from .amd_faults import LIVE_ALERT_PATTERNS
+from .collectors.amd_live import collect_amd_gpus
 from .config import require_https
 from .redaction import redact_value
 
@@ -1196,6 +1197,7 @@ def _build_agent_health(dmesg: dict[str, Any]) -> dict[str, Any]:
             "systemctl": bool(shutil.which("systemctl")),
             "dmesg": bool(shutil.which("dmesg")),
             "nvidia_smi": bool(shutil.which("nvidia-smi")),
+            "rocm_smi": bool(shutil.which("rocm-smi")),
         },
         "dmesg": {
             "readable": bool(dmesg.get("tail") or dmesg.get("critical_events")),
@@ -1347,6 +1349,12 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
             metrics["gpu"] = {"nvidia": {"available": True, "gpus": []}}
     else:
         metrics["gpu"] = {"nvidia": {"available": False, "gpus": []}}
+
+    # AMD GPUs, read from the kernel's amdgpu driver (see collectors/amd_live.py). Reported
+    # beside the NVIDIA entry with the same field names, so a machine with either vendor,
+    # or both, shows its GPUs. Without this a machine with only AMD cards reported "no GPU".
+    amd_gpus = _isolated("amd_gpu", collect_amd_gpus) or []
+    metrics["gpu"]["amd"] = {"available": bool(amd_gpus), "gpus": amd_gpus}
 
     # ── Stable sections with per-section TTLs ─────────────────────────────────
     # The Supabase upsert merges metrics (COALESCE || patch) so absent keys are
