@@ -196,12 +196,12 @@ _ADVICE: dict[str, dict[str, Any]] = {
         "contributing_factors": ["Storage I/O stalls.", "CPU oversubscription."],
     },
     "gpu_fault": {
-        "root_cause": "The GPU faulted (e.g. NVIDIA Xid error, 'fell off the bus', or a GPU hang), which can hang or crash the system.",
+        "root_cause": "The GPU faulted (e.g. an NVIDIA Xid error, an AMD ring timeout or GPU reset, 'fell off the bus', or a GPU hang), which can hang or crash the system.",
         "remediation": [
             {
                 "priority": 1,
-                "action": "Read the GPU error: journalctl -k | grep -iE 'NVRM: Xid|amdgpu|GPU' and look up the Xid code.",
-                "rationale": "Xid codes map to specific faults (ECC, fall-off-bus, app error).",
+                "action": "Read the GPU error: journalctl -k | grep -iE 'NVRM: Xid|amdgpu|GPU'. NVIDIA: look up the Xid code. AMD: look for 'ring ... timeout', 'GPU reset' and page faults.",
+                "rationale": "Xid codes (NVIDIA) and ring timeouts or resets (AMD) tell a hardware fault, a bus problem and an application error apart.",
             },
             {
                 "priority": 2,
@@ -210,12 +210,12 @@ _ADVICE: dict[str, dict[str, Any]] = {
             },
             {
                 "priority": 3,
-                "action": "Check GPU temperature and ECC errors (nvidia-smi -q).",
-                "rationale": "Overheating or failing VRAM produces recurring Xid errors.",
+                "action": "Check GPU temperature and memory errors (NVIDIA: nvidia-smi -q; AMD: rocm-smi, or the temperatures under /sys/class/drm/card*/device/hwmon).",
+                "rationale": "Overheating or failing VRAM produces recurring GPU faults.",
             },
         ],
         "monitoring_suggestions": [
-            "Alert on any NVRM Xid messages.",
+            "Alert on NVIDIA Xid messages and on AMD ring timeouts and GPU resets.",
             "Track GPU temperature and ECC error counts.",
         ],
         "contributing_factors": ["Driver/runtime mismatch.", "Insufficient PSU headroom."],

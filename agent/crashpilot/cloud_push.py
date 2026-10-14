@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 import httpx
 
+from .amd_faults import LIVE_ALERT_PATTERNS
 from .config import require_https
 from .redaction import redact_value
 
@@ -90,6 +91,9 @@ _LIVE_DMESG_PATTERN = re.compile(
         r"NVRM:.*(?:Xid|fault|error|fail|Out of memory|timeout|hang"
         r"|fallen off the bus|crash dump|RmInitAdapter)",
         r"amdgpu.*ERROR",
+        # A reset prints no "ERROR", so the line above never saw one (nor a hang's
+        # "ring ... timeout", nor a card that failed to start). See amd_faults.py.
+        *LIVE_ALERT_PATTERNS,
         # PCIe faults the hardware could not recover from. These used to be
         # bare "PCIe.*error" and "AER:", which also matched correctable errors
         # (routine link noise the hardware has already recovered from), their

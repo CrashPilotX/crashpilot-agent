@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from ..amd_faults import CRASH_EVIDENCE_PATTERNS
+
 
 class CrashType(str, Enum):
     KERNEL_PANIC = "kernel_panic"
@@ -107,6 +109,10 @@ _RULES: list[tuple[CrashType, Severity, list[str]]] = [
     (CrashType.GPU_FAULT, Severity.HIGH, [
         r"NVRM: Xid",
         r"amdgpu.*GPU fault",
+        # What current amdgpu kernels print for a hang, a reset, a failed start or a
+        # bad memory access. The line above matches none of it, so these used to be
+        # filed under "power loss". See amd_faults.py.
+        *CRASH_EVIDENCE_PATTERNS,
         # The driver says "GPU has fallen off the bus" and "fallen off the bus
         # and is not responding to commands". This read "GPU fell off the
         # bus" and only caught the event when an Xid line was also present.
