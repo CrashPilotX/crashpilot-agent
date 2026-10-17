@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: CrashPilotX/crashpilot-agent@main   # pin a tag or sha once one exists
+      - uses: CrashPilotX/crashpilot-agent@v0.2.0
         with:
           file: artifacts/dmesg.txt
 ```
@@ -27,7 +27,7 @@ jobs:
             sudo dmesg | tail -n 500
             echo 'EOF_LOG'
           } >> "$GITHUB_OUTPUT"
-      - uses: CrashPilotX/crashpilot-agent@main
+      - uses: CrashPilotX/crashpilot-agent@v0.2.0
         with:
           log: ${{ steps.capture.outputs.log }}
 ```
