@@ -2,10 +2,45 @@
 
 > The Linux crash-forensics agent behind [CrashPilot](https://crashpilotx.com). Open source, because you shouldn't have to trust a black box you run as root.
 
+[![Release](https://img.shields.io/github/v/release/CrashPilotX/crashpilot-agent)](https://github.com/CrashPilotX/crashpilot-agent/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue)](https://python.org)
 [![Tests](https://github.com/CrashPilotX/crashpilot-agent/actions/workflows/test.yml/badge.svg)](https://github.com/CrashPilotX/crashpilot-agent/actions/workflows/test.yml)
 [![Live demo](https://img.shields.io/badge/Try%20it-no%20signup%20required-orange)](https://crashpilotx.com/demo)
+
+## Try it in 60 seconds
+
+No root, no account, no network once it is installed. Classify a kernel log you already have:
+
+```bash
+pip install "git+https://github.com/CrashPilotX/crashpilot-agent.git@v0.2.0#subdirectory=agent"
+
+cat > dmesg.txt <<'EOF'
+[ 8123.456789] NVRM: Xid (PCI:0000:01:00): 79, pid='<unknown>', name=<unknown>, GPU has fallen off the bus.
+[ 8123.456800] NVRM: GPU 0000:01:00.0: GPU has fallen off the bus.
+EOF
+
+crashpilot classify dmesg.txt
+```
+
+```
+Category:   gpu_fault
+Severity:   HIGH
+Confidence: 70%
+Evidence:
+  [ 8123.456789] NVRM: Xid (PCI:0000:01:00): 79, pid='<unknown>', name=<unknown>, GPU has fallen off the bus.
+  [ 8123.456800] NVRM: GPU 0000:01:00.0: GPU has fallen off the bus.
+```
+
+The same check as a step in a GitHub Actions workflow ([docs/github-action.md](docs/github-action.md)):
+
+```yaml
+- uses: CrashPilotX/crashpilot-agent@v0.2.0
+  with:
+    file: artifacts/dmesg.txt
+```
+
+**What it is:** rule-based classification of crash logs (OOM kills, kernel panics, NVIDIA Xid and AMD GPU faults, thermal shutdowns, disk errors) and a Linux agent that does the same on a machine's last abnormal boot. **What it isn't:** a general log search or metrics store, and a log with no known crash signature comes back as `unknown`, not a guess. See [What it detects](#what-it-detects) for the exact list.
 
 ## Why this repo is public
 
