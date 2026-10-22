@@ -79,6 +79,18 @@ Connected to a dashboard, the heartbeat reports each GPU's utilization, memory, 
 
 An idle discrete AMD GPU is powered down by the driver after a few seconds. The agent never wakes a sleeping card to read it (the vendor tools do, and a wake-up every minute would change the machine's power behaviour). It reports such a card as `suspended`, 0% utilization, with its memory size, and shows temperature and power whenever the card is awake. Crash detection for GPU faults is separate; the table above lists what is classified.
 
+### Temperatures
+
+Connected to a dashboard, the heartbeat also reports CPU, memory and disk temperatures, each inside that component's own readings. They are read from the kernel's hwmon files (`/sys/class/hwmon`): no root, no extra tools, and nothing is run or opened beyond reading those files.
+
+| Component | Sensor | Needs |
+|---|---|---|
+| CPU | `k10temp` (AMD), `coretemp` (Intel), `zenpower`, `cpu_thermal` (ARM) | nothing extra |
+| Memory | the DIMM's `spd5118` or `jc42` sensor | a board and kernel that expose it; many machines, and most virtual machines, have none |
+| Disk | `nvme` for every NVMe drive; `drivetemp` for SATA and SAS drives | `sudo modprobe drivetemp` for SATA and SAS drives (add `drivetemp` to `/etc/modules-load.d/` to keep it) |
+
+GPU temperature comes with the GPU readings above. A sensor that cannot be read, or answers with a value no real component has (below -40 C or above 150 C), is left out instead of reported, and a component with no usable sensor reports none. At most 16 CPU sensors, 8 memory sensors and 8 disk sensors are sent; the component's maximum covers every sensor read.
+
 ## What leaves your machine
 
 This is the part worth reading closely before you install anything.
