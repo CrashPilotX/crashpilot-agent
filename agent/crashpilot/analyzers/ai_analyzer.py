@@ -304,11 +304,11 @@ def _no_api_key_result(detection: dict) -> dict:
     Pulls a plain-English root cause, remediation steps, and monitoring tips from
     the built-in knowledge base so the keyless path is actionable, not just a label.
     """
-    from .heuristic_advice import advice_for
+    from .heuristic_advice import advice_for_detection
 
     crash_type = detection.get("crash_type", "unknown")
     confidence = detection.get("confidence", 0.3)
-    advice = advice_for(crash_type)
+    advice = advice_for_detection(detection)
 
     return {
         "root_cause": advice["root_cause"],

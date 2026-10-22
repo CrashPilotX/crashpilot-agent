@@ -8,6 +8,10 @@ from enum import Enum
 from typing import Any
 
 from ..amd_faults import CRASH_EVIDENCE_PATTERNS
+from ..shutdown_markers import SHUTDOWN_SEQUENCE_PATTERNS, ended_with_shutdown, journal_output
+from .abrupt_end import analyze_abrupt_end
+from .abrupt_end import confidence as abrupt_end_confidence
+from .abrupt_end import describe as describe_abrupt_end
 
 
 class CrashType(str, Enum):
@@ -128,13 +132,9 @@ _RULES: list[tuple[CrashType, Severity, list[str]]] = [
         r"BTRFS.*error",
         r"end_request: I/O error",
     ]),
-    (CrashType.CLEAN_SHUTDOWN, Severity.INFO, [
-        r"System is powering down",
-        r"Reached target.*Power-Off",
-        r"reboot: Power down",
-        r"Stopped target.*Shutdown",
-        r"systemd-shutdown.*Shutting down",
-    ]),
+    # Shared with the code that checks how earlier boots ended, so "this boot shut down
+    # normally" means one thing everywhere (see shutdown_markers.py).
+    (CrashType.CLEAN_SHUTDOWN, Severity.INFO, SHUTDOWN_SEQUENCE_PATTERNS),
 ]
 
 
@@ -147,6 +147,8 @@ def detect_crash_type(telemetry: dict[str, Any]) -> DetectionResult:
 
     # Check clean shutdown first
     shutdown_hits = _match_patterns(CrashType.CLEAN_SHUTDOWN.value, text_corpus, _RULES[-1][2])
+    if not shutdown_hits:
+        shutdown_hits = _shutdown_at_end_of_log(telemetry)
     if shutdown_hits and not _has_panic_patterns(text_corpus):
         return DetectionResult(
             crash_type=CrashType.CLEAN_SHUTDOWN,
@@ -209,7 +211,8 @@ def detect_crash_type(telemetry: dict[str, Any]) -> DetectionResult:
 
     # No pattern matched - power loss or unknown
     result = _infer_power_loss_or_unknown(telemetry)
-    result.evidence_sources = [_line_source(line_sources, e) for e in result.evidence]
+    if not result.evidence_sources:
+        result.evidence_sources = [_line_source(line_sources, e) for e in result.evidence]
     return result
 
 
@@ -323,14 +326,52 @@ def _enrich_with_hardware(results: list[DetectionResult], telemetry: dict) -> No
                 r.signals["thermal_warnings"] = thermal["thermal_warnings"]
 
 
-def _infer_power_loss_or_unknown(telemetry: dict) -> DetectionResult:
-    """When no patterns match, try to distinguish power loss from unknown."""
-    journal = telemetry.get("journal", {})
-    boots = journal.get("boots", [])
-    shutdown = journal.get("shutdown_info", "")
+def _shutdown_at_end_of_log(telemetry: dict) -> list[str]:
+    """The last line of the previous boot, if the log ends with a shutdown sequence.
 
-    # If shutdown_info is empty, it's likely a power loss (no clean shutdown marker)
-    if not shutdown.strip() and len(boots) > 1:
+    journald's "Journal stopped" is the final line of a normal shutdown but also what it
+    prints when it is merely restarted, so unlike the other markers it only counts at the end.
+    """
+    tail = (telemetry.get("journal") or {}).get("previous_boot_logs_tail") or ""
+    lines = [line for line in tail.splitlines() if line.strip()]
+    if lines and ended_with_shutdown(lines):
+        return [lines[-1].strip()[:200]]
+    return []
+
+
+def _abrupt_end_result(analysis: dict) -> DetectionResult:
+    """A boot whose log just stops: no shutdown sequence, and no error before it.
+
+    The type stays power_loss, the nearest existing one, but the evidence says what is
+    actually known: the log ended abruptly, what had just started, how long the machine then
+    stayed down, and whether earlier boots ended the same way. Whether it was the power supply
+    or a lock-up is something the logs cannot say, and the report does not claim to know.
+    """
+    evidence = describe_abrupt_end(analysis)
+    return DetectionResult(
+        crash_type=CrashType.POWER_LOSS,
+        severity=Severity.HIGH,
+        confidence=abrupt_end_confidence(analysis),
+        evidence=evidence,
+        evidence_sources=["journal"] * len(evidence),
+        signals={"abrupt_end": analysis},
+    )
+
+
+def _infer_power_loss_or_unknown(telemetry: dict) -> DetectionResult:
+    """When no patterns match, work out whether the boot simply stopped, or is unknown."""
+    journal = telemetry.get("journal", {})
+
+    abrupt = analyze_abrupt_end(telemetry)
+    if abrupt is not None:
+        return _abrupt_end_result(abrupt)
+
+    # No log of the previous boot to read: all there is to go on is whether a shutdown record
+    # was found at all. journalctl answers an empty query with a placeholder line, which is not
+    # "a record".
+    boots = journal.get("boots", [])
+    shutdown = journal_output(journal.get("shutdown_info", ""))
+    if not shutdown and len(boots) > 1:
         return DetectionResult(
             crash_type=CrashType.POWER_LOSS,
             severity=Severity.HIGH,

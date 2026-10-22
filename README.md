@@ -63,10 +63,20 @@ This agent watches every boot. When it sees an abnormal one, it reconstructs the
 | GPU fault (NVIDIA Xid; AMD ring timeout, GPU reset, failed start) | nvidia-smi + kernel log |
 | Thermal shutdown | ACPI THERMTRIP + lm-sensors |
 | Machine Check Exception | mcelog / rasdaemon + dmesg |
-| Power loss | Missing journal shutdown marker |
+| Sudden stop (power loss or hard lock-up) | A boot whose log ends with no shutdown sequence and no error; see below |
 | Disk I/O error | dmesg + smartctl SMART data |
 | Watchdog reset / soft lockup | kernel hung task detection |
 | PCIe fault | Uncorrectable AER errors raise a live alert and go to the AI analysis; the offline heuristics do not classify them |
+
+### Sudden stops
+
+A machine that loses power, or locks up hard, cannot log why. Its journal just ends. CrashPilot tells that apart from a normal shutdown or reboot by whether the end of the log shows the shutdown sequence systemd writes (the shutdown target, `systemd-shutdown`, and journald's last "Journal stopped"), and for a log with none it reads what surrounds the cut-off instead of stopping at "unknown":
+
+- what started just before it: a stress test, a benchmark, a CI job, a scheduled command;
+- how long the machine stayed down, which separates an automatic reset (a minute or two) from one that stayed dead until it was restarted by hand;
+- whether earlier boots ended the same way. One stop can be anything; the same ending on several boots with nothing in the logs points at hardware or power, not software.
+
+The report states what is known, not a cause: the logs cannot tell a failing power supply from a hardware lock-up. Its first steps depend on the evidence (cap the GPU's power if a GPU load had just started; check the supply's rating and the power connectors; read the BMC event log if there is one; compare how earlier boots ended). Confidence rises only with corroboration and never reaches certainty.
 
 ### GPU load
 
