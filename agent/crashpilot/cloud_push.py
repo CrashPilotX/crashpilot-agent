@@ -26,6 +26,7 @@ import httpx
 
 from .amd_faults import LIVE_ALERT_PATTERNS
 from .collectors.amd_live import collect_amd_gpus
+from .collectors.temps_live import collect_temperatures
 from .config import require_https
 from .redaction import redact_value
 
@@ -1300,6 +1301,14 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
         if slim:
             network = {key: value for key, value in network.items() if key != "speedtest"}
         metrics["network"] = network
+
+    # Temperatures from the kernel's hwmon files (see collectors/temps_live.py). Each part sits
+    # inside its own component's section, and only where that section exists, so a missing
+    # meminfo or disk reading never leaves a section holding nothing but a temperature.
+    temperatures = _isolated("temperatures", collect_temperatures) or {}
+    for component, readings in temperatures.items():
+        if component in metrics:
+            metrics[component]["temperatures"] = readings
 
     if shutil.which("nvidia-smi"):
         try:
