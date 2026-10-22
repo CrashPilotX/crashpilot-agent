@@ -7,12 +7,18 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from ..shutdown_markers import ended_with_shutdown, journal_output
 from .base import BaseCollector, run_cmd
 
 # systemd before 254 (Ubuntu 22.04 has 249) ignores --output=json for
 # --list-boots and prints a table: "-1 <boot id> Mon 2026-08-17 22:05:00 UTC—...".
 _TEXT_BOOT_ROW = re.compile(r"^\s*(-?\d+)\s+([0-9a-f]{32})\s+(.*)$")
 _TEXT_UTC_TIME = re.compile(r"(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) UTC")
+
+# How many earlier boots are checked for how they ended, and how much of the end of each is read.
+# journalctl --lines seeks to the end of the boot, so each check is quick however large the journal.
+_BOOT_ENDINGS = 8
+_ENDING_LINES = 60
 
 
 def _text_boot_entry(row: re.Match[str]) -> dict[str, Any]:
@@ -70,6 +76,9 @@ class JournalCollector(BaseCollector):
         coredumps = await self._get_coredumps()
         # OOM kills
         oom_events = await self._get_oom_events(prev_boot_id)
+        # Whether earlier boots also ended without a shutdown sequence: one such stop can be
+        # anything, but the same ending several times over is a pattern.
+        boot_endings = await self._get_boot_endings(boots)
 
         return {
             "boots": boots[-5:],
@@ -78,6 +87,7 @@ class JournalCollector(BaseCollector):
             "previous_boot_logs_tail": prev_logs,
             "previous_boot_errors": prev_priority_logs,
             "shutdown_info": shutdown_info,
+            "boot_endings": boot_endings,
             "coredumps": coredumps,
             "oom_events": oom_events,
         }
@@ -129,15 +139,44 @@ class JournalCollector(BaseCollector):
         return stdout
 
     async def _get_shutdown_info(self) -> str:
+        # By syslog identifier (-t), not by unit (-u). systemd-shutdown's lines are not written
+        # under a unit, so `-u systemd-shutdown` found nothing even after a clean shutdown, and
+        # answered "-- No entries --", which is not empty. The record that was searched for never
+        # existed, so no boot could ever look like it had stopped without one.
         stdout, _, _ = await run_cmd(
             "journalctl",
             "--no-pager",
             "--output=short-iso",
             "--lines=100",
             "-b", "-1",
-            "-u", "systemd-shutdown",
+            "-t", "systemd-shutdown",
         )
-        return stdout
+        return journal_output(stdout)
+
+    async def _get_boot_endings(self, boots: list[dict]) -> list[dict[str, Any]]:
+        """For each recent earlier boot: did its log end with a shutdown sequence?
+
+        ended_cleanly is None when the end of that boot's log could not be read, which is
+        not the same as False: an unreadable boot is not counted as one that was cut off.
+        """
+        endings: list[dict[str, Any]] = []
+        for boot in [b for b in boots[:-1] if b.get("boot_id")][-_BOOT_ENDINGS:]:
+            stdout, _, rc = await run_cmd(
+                "journalctl",
+                f"--boot={boot['boot_id']}",
+                "--no-pager",
+                f"--lines={_ENDING_LINES}",
+                "--output=short-iso",
+                timeout=20,
+            )
+            lines = [line for line in stdout.splitlines() if line.strip()]
+            endings.append({
+                "boot_id": boot["boot_id"],
+                "first_entry": boot.get("first_entry", ""),
+                "last_entry": boot.get("last_entry", ""),
+                "ended_cleanly": ended_with_shutdown(lines) if rc == 0 and lines else None,
+            })
+        return endings
 
     async def _get_coredumps(self) -> list[dict]:
         stdout, _, rc = await run_cmd(

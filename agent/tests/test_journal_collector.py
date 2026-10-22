@@ -63,6 +63,7 @@ class TestJournalCollectorBootSelection:
         collector._get_shutdown_info = AsyncMock(return_value="")
         collector._get_coredumps = AsyncMock(return_value=[])
         collector._get_oom_events = AsyncMock(return_value="")
+        collector._get_boot_endings = AsyncMock(return_value=[])
 
         result = await collector.collect()
 
@@ -82,6 +83,7 @@ class TestJournalCollectorBootSelection:
         collector._get_shutdown_info = AsyncMock(return_value="")
         collector._get_coredumps = AsyncMock(return_value=[])
         collector._get_oom_events = AsyncMock(return_value="")
+        collector._get_boot_endings = AsyncMock(return_value=[])
 
         result = await collector.collect()
 
@@ -102,6 +104,7 @@ class TestJournalCollectorBootSelection:
         collector._get_shutdown_info = AsyncMock(return_value="")
         collector._get_coredumps = AsyncMock(return_value=[])
         collector._get_oom_events = AsyncMock(return_value="")
+        collector._get_boot_endings = AsyncMock(return_value=[])
 
         result = await collector.safe_collect()
 
@@ -140,3 +143,79 @@ class TestJournalCollectorBootSelection:
         collector = JournalCollector()
 
         assert await collector._list_boots() == []
+
+
+_CLEAN_END = "\n".join([
+    "2026-10-20T12:30:18+00:00 host systemd[1]: Shutting down.",
+    "2026-10-20T12:30:18+00:00 host systemd-shutdown[1]: Syncing filesystems and block devices.",
+    "2026-10-20T12:30:18+00:00 host systemd-journald[585]: Journal stopped",
+])
+_CUT_OFF_END = "\n".join([
+    "2026-10-22T14:12:07+00:00 host runsvc.sh[500]: Running job: gpu-burn on rtx",
+    "2026-10-22T14:12:39+00:00 host cloudflared[40]: INF Tunnel connection",
+])
+
+
+@pytest.mark.asyncio
+class TestShutdownRecordAndBootEndings:
+    async def test_the_shutdown_record_is_asked_for_by_identifier_not_unit(self, monkeypatch):
+        # `-u systemd-shutdown` finds nothing even after a clean shutdown: its lines are not written
+        # under a unit. The identifier is what finds them.
+        calls = []
+
+        async def fake(*args, **kwargs):
+            calls.append(args)
+            return "-- No entries --\n", "", 0
+
+        monkeypatch.setattr(journal_module, "run_cmd", fake)
+        assert await JournalCollector()._get_shutdown_info() == ""  # the placeholder is not a record
+        assert "-t" in calls[0] and "systemd-shutdown" in calls[0] and "-u" not in calls[0]
+
+    async def test_a_real_shutdown_record_is_returned(self, monkeypatch):
+        record = "2026-10-20T12:30:18+00:00 host systemd-shutdown[1]: Syncing filesystems and block devices."
+        monkeypatch.setattr(journal_module, "run_cmd", AsyncMock(return_value=(record + "\n", "", 0)))
+        assert await JournalCollector()._get_shutdown_info() == record
+
+    async def test_each_earlier_boot_is_marked_clean_cut_off_or_unreadable(self, monkeypatch):
+        outputs = {
+            "clean": (_CLEAN_END, "", 0),
+            "cutoff": (_CUT_OFF_END, "", 0),
+            "failed": ("", "boot not found", 1),
+            "empty": ("", "", 0),
+        }
+
+        async def fake(*args, **kwargs):
+            boot = next(a.split("=", 1)[1] for a in args if a.startswith("--boot="))
+            return outputs[boot]
+
+        monkeypatch.setattr(journal_module, "run_cmd", fake)
+        boots = [{"boot_id": name, "first_entry": "f", "last_entry": "l"} for name in ("clean", "cutoff", "failed", "empty", "current")]
+        endings = await JournalCollector()._get_boot_endings(boots)
+        assert [(e["boot_id"], e["ended_cleanly"]) for e in endings] == [
+            ("clean", True), ("cutoff", False), ("failed", None), ("empty", None),
+        ]  # the current boot has not ended, so it is not listed
+        assert endings[0]["first_entry"] == "f" and endings[0]["last_entry"] == "l"
+
+    async def test_only_the_most_recent_boots_are_checked(self, monkeypatch):
+        asked = []
+
+        async def fake(*args, **kwargs):
+            asked.append(next(a for a in args if a.startswith("--boot=")))
+            return _CLEAN_END, "", 0
+
+        monkeypatch.setattr(journal_module, "run_cmd", fake)
+        boots = [{"boot_id": f"b{i:02d}"} for i in range(15)]
+        endings = await JournalCollector()._get_boot_endings(boots)
+        assert [e["boot_id"] for e in endings] == [f"b{i:02d}" for i in range(6, 14)]
+        assert len(asked) == 8
+
+    async def test_collect_reports_the_endings(self, monkeypatch):
+        monkeypatch.setattr(journal_module, "run_cmd", AsyncMock(return_value=(_REAL_LIST_BOOTS_OUTPUT, "", 0)))
+        collector = JournalCollector()
+        collector._get_boot_logs = AsyncMock(return_value="")
+        collector._get_shutdown_info = AsyncMock(return_value="")
+        collector._get_coredumps = AsyncMock(return_value=[])
+        collector._get_oom_events = AsyncMock(return_value="")
+        collector._get_boot_endings = AsyncMock(return_value=[{"boot_id": "bbbb", "ended_cleanly": False}])
+        result = await collector.collect()
+        assert result["boot_endings"] == [{"boot_id": "bbbb", "ended_cleanly": False}]

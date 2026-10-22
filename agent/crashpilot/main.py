@@ -107,7 +107,7 @@ def analyze(
             weight = ev.get("weight", 0)
             table.add_row(
                 ev.get("source", ""),
-                ev.get("interpretation", ev.get("excerpt", ""))[:80],
+                (ev.get("interpretation") or ev.get("excerpt") or "")[:80],
                 f"{weight:.0%}",
             )
         console.print(table)
