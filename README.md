@@ -89,6 +89,30 @@ Connected to a dashboard, the heartbeat reports each GPU's utilization, memory, 
 
 An idle discrete AMD GPU is powered down by the driver after a few seconds. The agent never wakes a sleeping card to read it (the vendor tools do, and a wake-up every minute would change the machine's power behaviour). It reports such a card as `suspended`, 0% utilization, with its memory size, and shows temperature and power whenever the card is awake. Crash detection for GPU faults is separate; the table above lists what is classified.
 
+### Network health
+
+Connected to a dashboard, the agent watches the machine's connection on every heartbeat and says when it degrades. Traffic alone cannot tell whether a connection is the reason things feel slow, so it records what the connection does under load:
+
+- **the port:** the speed and duplex it negotiated (a wired port stuck at 100 Mbps, or at half duplex, is the commonest slow-network fault);
+- **loss:** dropped and errored packets, and the share of TCP packets that had to be sent again, read from the kernel's counters;
+- **latency:** the round trip to your router (3 pings) and to the internet, measured as the time to open one TCP connection to the dashboard host, the one address the agent already talks to. No other address is contacted.
+
+From about a week of these readings it reaches a verdict and says why:
+
+| Verdict | Meaning | What it tells you |
+|---|---|---|
+| Slow port | A wired port runs at 100 Mbps or less, or at half duplex | Replace the cable, check the switch or router port |
+| Packet loss | Many resent packets, port errors, or lost pings to the router | Check the cable or Wi-Fi first |
+| Saturated | Latency climbed for a sustained period while traffic was at the link's capacity | The link is the limit: a faster plan would help |
+| Congested | Latency climbed for a sustained period but traffic was low, or the router was slow too | More bandwidth would not have fixed it |
+| Healthy | None of the above in the window | |
+
+An advertised plan speed is an "up to" figure, so capacity is taken, in order, from `CRASHPILOT_NETWORK_PLAN_DOWN_MBPS` and `CRASHPILOT_NETWORK_PLAN_UP_MBPS` if you set them, from the optional speed test, or from the speed the traffic keeps reaching and never exceeds. Without any of those a slowdown is reported as congestion, and the report says why it cannot say more. Slowdowns must last 15 minutes to count, so a single blip raises nothing.
+
+The dashboard raises a warning when the verdict is one of the four problems, at most one per kind every 6 hours. The agent also keeps the bytes this machine moved each calendar month. Those include traffic between your own machines, so they can be higher than what your internet provider counts.
+
+It needs no root and costs about half a second per heartbeat, almost all of it the pings. About a week of readings is kept in the agent's local database (around 1 MB). To turn it off, set `CRASHPILOT_NETWORK_HEALTH_ENABLED=false`; to keep it but skip the router pings or the internet reading, set `CRASHPILOT_NETWORK_PROBE_GATEWAY=false` or `CRASHPILOT_NETWORK_PROBE_INTERNET=false`.
+
 ### Temperatures
 
 Connected to a dashboard, the heartbeat also reports CPU, memory and disk temperatures, each inside that component's own readings. They are read from the kernel's hwmon files (`/sys/class/hwmon`): no root, no extra tools, and nothing is run or opened beyond reading those files.

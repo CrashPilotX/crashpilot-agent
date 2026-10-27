@@ -789,12 +789,15 @@ def heartbeat(
         # Exit 0 so the systemd timer treats an unconfigured agent as a no-op.
         raise typer.Exit(0)
 
-    from .cloud_push import push_heartbeat, push_report
+    from .cloud_push import push_heartbeat, push_report, record_network_sample
     from .storage.store import init_db, list_unpushed, mark_push_rejected, mark_pushed
 
     init_db()
 
     async def _heartbeat_and_backfill() -> int:
+        # One reading of the network per tick, before the push so the verdict that rides in it
+        # includes the reading just taken.
+        await asyncio.to_thread(record_network_sample)
         await push_heartbeat(
             supabase_url=cfg.supabase_url,
             anon_key=cfg.supabase_anon_key,

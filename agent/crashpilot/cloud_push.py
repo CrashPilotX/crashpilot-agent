@@ -25,7 +25,9 @@ from typing import Any, Callable
 import httpx
 
 from .amd_faults import LIVE_ALERT_PATTERNS
+from .analyzers.network_health import assess as assess_network
 from .collectors.amd_live import collect_amd_gpus
+from .collectors.net_health import take_sample as take_network_sample
 from .collectors.temps_live import collect_temperatures
 from .config import require_https
 from .redaction import redact_value
@@ -504,6 +506,72 @@ def _collect_network_usage() -> dict[str, Any]:
         counters["speedtest"] = speedtest
 
     return counters
+
+
+def record_network_sample() -> None:
+    """Take and store one reading of the default connection.
+
+    Called once per heartbeat tick, separately from the live-metrics build: that runs every few
+    minutes, far too coarse to see a slowdown that lasts a few. It costs a few milliseconds plus 3
+    pings to the router. A failure here is logged and never stops the heartbeat.
+    """
+    from .config import get_settings
+    from .storage.store import init_db, save_network_sample
+
+    settings = get_settings()
+    if not getattr(settings, "network_health_enabled", True):
+        return
+    try:
+        sample = take_network_sample(
+            dashboard_url=settings.supabase_url,
+            probe_gateway=getattr(settings, "network_probe_gateway", True),
+            probe_internet=getattr(settings, "network_probe_internet", True),
+        )
+        if sample:
+            init_db()
+            save_network_sample(sample)
+    except Exception as exc:
+        log.warning("Network reading failed; the heartbeat goes on without it: %s", exc)
+
+
+def _network_health_sections(speedtest: dict[str, Any] | None) -> dict[str, Any]:
+    """The heartbeat's network health, assessment and monthly usage, from what was stored locally."""
+    from .config import get_settings
+    from .storage.store import get_network_usage, list_network_samples
+
+    settings = get_settings()
+    sections: dict[str, Any] = {}
+    samples = list_network_samples(168)
+    if samples:
+        last = samples[-1]
+        resent_pct: float | None = None
+        if len(samples) > 1:
+            before = samples[-2]
+            try:
+                segments, resent = last["tcp_out"] - before["tcp_out"], last["tcp_retrans"] - before["tcp_retrans"]
+                if segments >= 50 and resent >= 0:
+                    resent_pct = round(100 * resent / segments, 2)
+            except TypeError:
+                resent_pct = None
+        sections["health"] = {
+            "interface": last["iface"], "medium": last["medium"], "link_speed_mbps": last["link_speed_mbps"],
+            "duplex": last["duplex"], "gateway_rtt_ms": last["gw_rtt_ms"], "internet_rtt_ms": last["inet_rtt_ms"],
+            "retransmit_pct": resent_pct,
+        }
+        sections["assessment"] = assess_network(
+            samples,
+            plan_down_mbps=getattr(settings, "network_plan_down_mbps", None),
+            plan_up_mbps=getattr(settings, "network_plan_up_mbps", None),
+            speedtest=speedtest,
+        )
+    usage = get_network_usage()
+    if usage:
+        rx, tx = usage["rx_bytes"] / 1e9, usage["tx_bytes"] / 1e9
+        sections["usage"] = {
+            "month": usage["month"], "rx_gb": round(rx, 2), "tx_gb": round(tx, 2),
+            "total_gb": round(rx + tx, 2), "since": usage["since"],
+        }
+    return sections
 
 
 def _live_dmesg_cache_path() -> Path | None:
@@ -1298,9 +1366,11 @@ def _build_live_metrics(*, slim: bool = False) -> dict[str, Any]:
 
     network = _isolated("network", _collect_network_usage)
     if network:
+        # The verdict uses the speed test, so it is read before slim mode drops that from the payload.
+        health = _isolated("network_health", lambda: _network_health_sections(network.get("speedtest"))) or {}
         if slim:
             network = {key: value for key, value in network.items() if key != "speedtest"}
-        metrics["network"] = network
+        metrics["network"] = {**network, **health}
 
     # Temperatures from the kernel's hwmon files (see collectors/temps_live.py). Each part sits
     # inside its own component's section, and only where that section exists, so a missing

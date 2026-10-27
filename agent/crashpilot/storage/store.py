@@ -7,6 +7,7 @@ import random
 import sqlite3
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any, Callable, Generator, TypeVar
 
 from ..config import get_settings
@@ -50,6 +51,40 @@ CREATE TABLE IF NOT EXISTS flight_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_flight_snapshots_captured
     ON flight_snapshots(captured_at DESC);
+
+-- One row per heartbeat tick, kept for about a week: enough for the network verdict to see a
+-- whole week's pattern, small enough (about 1 MB) to forget about. See collectors/net_health.py.
+CREATE TABLE IF NOT EXISTS network_samples (
+    ts              REAL PRIMARY KEY,   -- epoch seconds
+    iface           TEXT NOT NULL,
+    medium          TEXT,
+    link_speed_mbps INTEGER,
+    duplex          TEXT,
+    rx_bytes        INTEGER NOT NULL,   -- cumulative counters: rates come from differences
+    tx_bytes        INTEGER NOT NULL,
+    rx_errs         INTEGER,
+    rx_drops        INTEGER,
+    tx_errs         INTEGER,
+    tx_drops        INTEGER,
+    tcp_out         INTEGER,
+    tcp_retrans     INTEGER,
+    gw_rtt_ms       REAL,
+    gw_loss_pct     REAL,
+    inet_rtt_ms     REAL
+);
+
+-- Bytes moved per calendar month (UTC), added up from the counters as they grow, so a reboot
+-- (counters back to zero) does not lose what came before it. last_* is the previous reading.
+CREATE TABLE IF NOT EXISTS network_usage (
+    month     TEXT PRIMARY KEY,         -- 'YYYY-MM'
+    rx_bytes  INTEGER NOT NULL DEFAULT 0,
+    tx_bytes  INTEGER NOT NULL DEFAULT 0,
+    since     TEXT NOT NULL,
+    last_ts   REAL,
+    last_iface TEXT,
+    last_rx   INTEGER,
+    last_tx   INTEGER
+);
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
     id              TEXT PRIMARY KEY,
@@ -365,6 +400,77 @@ def list_flight_snapshots(hours: int = 1, limit: int = 240) -> list[dict]:
             (f"-{hours}", limit),
         ).fetchall()
     return [json.loads(row["snapshot"]) for row in reversed(rows)]
+
+
+_SAMPLE_COLUMNS = (
+    "ts", "iface", "medium", "link_speed_mbps", "duplex", "rx_bytes", "tx_bytes", "rx_errs", "rx_drops",
+    "tx_errs", "tx_drops", "tcp_out", "tcp_retrans", "gw_rtt_ms", "gw_loss_pct", "inet_rtt_ms",
+)
+# A gap this long between readings is a machine that was off or asleep, not traffic to count.
+_USAGE_MAX_GAP_S = 6 * 3600
+
+
+def save_network_sample(sample: dict, retention_days: int = 8) -> None:
+    """Record one connection reading, add its bytes to the month's usage, and drop old readings."""
+    values = tuple(sample.get(column) for column in _SAMPLE_COLUMNS)
+    if values[0] is None or values[1] is None or values[5] is None or values[6] is None:
+        raise ValueError("a network sample needs ts, iface, rx_bytes and tx_bytes")
+    with _conn() as con:
+        con.execute(
+            f"INSERT OR REPLACE INTO network_samples({', '.join(_SAMPLE_COLUMNS)}) "
+            f"VALUES ({', '.join('?' for _ in _SAMPLE_COLUMNS)})",
+            values,
+        )
+        con.execute("DELETE FROM network_samples WHERE ts < ?", (sample["ts"] - retention_days * 86400,))
+        _add_to_usage(con, sample)
+
+
+def _add_to_usage(con: sqlite3.Connection, sample: dict) -> None:
+    moment = datetime.fromtimestamp(sample["ts"], tz=timezone.utc)
+    month = moment.strftime("%Y-%m")
+    con.execute(
+        "INSERT OR IGNORE INTO network_usage(month, since) VALUES (?, ?)",
+        (month, moment.strftime("%Y-%m-%dT%H:%M:%SZ")),
+    )
+    # The baseline is the latest reading of any month, so the interval that crosses midnight on the
+    # 1st is counted (in the new month) instead of being lost.
+    row = con.execute(
+        "SELECT last_ts, last_iface, last_rx, last_tx FROM network_usage "
+        "WHERE last_ts IS NOT NULL ORDER BY last_ts DESC LIMIT 1"
+    ).fetchone()
+    rx, tx = sample["rx_bytes"], sample["tx_bytes"]
+    add_rx = add_tx = 0
+    if (
+        row is not None and row["last_iface"] == sample["iface"]
+        and 0 < sample["ts"] - row["last_ts"] <= _USAGE_MAX_GAP_S
+    ):
+        # Counters that went backwards were reset by a reboot: what is there now was moved since.
+        add_rx = rx - row["last_rx"] if rx >= row["last_rx"] else rx
+        add_tx = tx - row["last_tx"] if tx >= row["last_tx"] else tx
+    con.execute(
+        """UPDATE network_usage SET rx_bytes = rx_bytes + ?, tx_bytes = tx_bytes + ?,
+               last_ts = ?, last_iface = ?, last_rx = ?, last_tx = ? WHERE month = ?""",
+        (add_rx, add_tx, sample["ts"], sample["iface"], rx, tx, month),
+    )
+
+
+def list_network_samples(hours: float = 168, limit: int = 20000) -> list[dict]:
+    """The readings in the window, oldest first. Readings stamped in the future are left out."""
+    now = time.time()
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM network_samples WHERE ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT ?",
+            (now - hours * 3600, now + 60, limit),
+        ).fetchall()
+    return [dict(row) for row in reversed(rows)]
+
+
+def get_network_usage(month: str | None = None) -> dict | None:
+    """Bytes moved this month (or the month given as 'YYYY-MM'), or None if nothing was recorded."""
+    month = month or datetime.now(timezone.utc).strftime("%Y-%m")
+    with _conn() as con:
+        row = con.execute("SELECT month, rx_bytes, tx_bytes, since FROM network_usage WHERE month=?", (month,)).fetchone()
+    return dict(row) if row else None
 
 
 def enqueue_webhook_delivery(delivery: dict) -> str:
