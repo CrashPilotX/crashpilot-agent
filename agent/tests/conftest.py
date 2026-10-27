@@ -26,6 +26,9 @@ def _hermetic_agent_paths(monkeypatch, tmp_path_factory):
     # Left to derive from whichever data dir the test ends up using, so a test
     # that sets only CRASHPILOT_DATA_DIR still gets its database beside it.
     monkeypatch.delenv("CRASHPILOT_DB_PATH", raising=False)
+    # A test must not ping the router of the machine it runs on. Tests of the network readings pass
+    # what they need in, or switch this back on.
+    monkeypatch.setenv("CRASHPILOT_NETWORK_HEALTH_ENABLED", "false")
     # An existing file here is found before any fallback outside the sandbox.
     (root / ".env").write_text("")
     for name in (

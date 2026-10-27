@@ -171,6 +171,18 @@ class Settings(BaseSettings):
     bandwidth_speedtest_interval_seconds: int = 21600
     bandwidth_speedtest_timeout_seconds: int = 90
 
+    # Network health: on every heartbeat, a reading of the default connection (link speed, packet
+    # loss, latency) and, from a week of them, a verdict on whether it is degraded. On by default
+    # because it costs almost nothing and contacts only the router (3 pings) and the dashboard
+    # host the agent already talks to. See collectors/net_health.py.
+    network_health_enabled: bool = True
+    network_probe_gateway: bool = True
+    network_probe_internet: bool = True
+    # What the internet plan is rated for, if known. Optional: a plan's speed is an "up to" figure,
+    # so without it the verdict learns the link's real ceiling from the traffic it carries.
+    network_plan_down_mbps: float | None = None
+    network_plan_up_mbps: float | None = None
+
     # Cloud heartbeat egress controls.  The one-minute heartbeat keeps systems
     # online, but detailed live metrics and status polling can run less often.
     live_metrics_interval_seconds: int = 900
